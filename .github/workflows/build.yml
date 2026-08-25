@@ -1,0 +1,84 @@
+name: Build APK
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Restore signing keystore from secrets
+        env:
+          KEYSTORE_B64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PROPS: ${{ secrets.KEYSTORE_PROPERTIES }}
+        run: |
+          if [ -n "$KEYSTORE_B64" ]; then
+            echo "$KEYSTORE_B64" | base64 -d > /home/runner/hermesbots.keystore
+            mkdir -p HermesBots
+            printf '%s' "$KEYSTORE_PROPS" > HermesBots/keystore.properties
+            echo "Keystore przywrocony z sekretow"
+          else
+            echo "Brak sekretow podpisu — release bedzie unsigned"
+          fi
+
+      - name: Grant execute for gradlew wrapper bootstrap
+        run: mkdir -p HermesBots/gradle/wrapper
+
+      - name: Build debug APK
+        working-directory: HermesBots
+        run: |
+          gradle assembleDebug --no-daemon || {
+            curl -sL https://services.gradle.org/distributions/gradle-8.9-bin.zip -o /tmp/g.zip
+            unzip -q /tmp/g.zip -d /tmp
+            /tmp/gradle-8.9/bin/gradle assembleDebug --no-daemon
+          }
+
+      - name: Build release APK (signed gdy sa sekrety)
+        if: startsWith(github.ref, 'refs/tags/v')
+        working-directory: HermesBots
+        run: |
+          GRADLE_CMD="assembleRelease --no-daemon"
+          if command -v gradle >/dev/null; then gradle $GRADLE_CMD; else /tmp/gradle-8.9/bin/gradle $GRADLE_CMD; fi
+
+      - name: Upload debug APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: HermesBots-debug
+          path: HermesBots/app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Upload release APK artifact
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@v4
+        with:
+          name: HermesBots-release
+          path: HermesBots/app/build/outputs/apk/release/app-release.apk
+
+      - name: Attach APKs to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            HermesBots/app/build/outputs/apk/release/*.apk \
+            HermesBots/app/build/outputs/apk/debug/app-debug.apk \
+            --title "Hermes Bots ${GITHUB_REF_NAME}" \
+            --notes "Build z CI. Instaluj release (podpisany), debug tylko do testow." \
+            || gh release upload "${GITHUB_REF_NAME}" \
+            HermesBots/app/build/outputs/apk/release/*.apk HermesBots/app/build/outputs/apk/debug/app-debug.apk
