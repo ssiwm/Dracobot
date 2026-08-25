@@ -4,8 +4,20 @@
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
-    <group android:scaleX="0.5" android:scaleY="0.5" android:translateX="27" android:translateY="27">
-        <path android:fillColor="#FFFFFF"
-            android:pathData="M54,10 L86,28 L86,64 C86,80 72,92 54,98 C36,92 22,80 22,64 L22,28 Z M40,44 A6,6 0 1,0 40,56 A6,6 0 1,0 40,44 Z M68,44 A6,6 0 1,0 68,56 A6,6 0 1,0 68,44 Z M42,66 Q54,76 66,66 L62,62 Q54,69 46,62 Z"/>
-    </group>
+    <!-- Dymek czatu z oczami — brand „czat z botami" -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M20,26 C20,18 28,14 54,14 C80,14 88,18 88,26 L88,58 C88,66 80,70 54,70 L40,70 L26,84 L28,70 C22,68 20,64 20,58 Z"/>
+    <path
+        android:fillColor="#12314F"
+        android:pathData="M42,42 m-5,0 a5,5.4 0 1,0 10,0 a5,5.4 0 1,0 -10,0"/>
+    <path
+        android:fillColor="#12314F"
+        android:pathData="M66,42 m-5,0 a5,5.4 0 1,0 10,0 a5,5.4 0 1,0 -10,0"/>
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M40.5,40.5 m-1.5,0 a1.5,1.5 0 1,0 3,0 a1.5,1.5 0 1,0 -3,0"/>
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M64.5,40.5 m-1.5,0 a1.5,1.5 0 1,0 3,0 a1.5,1.5 0 1,0 -3,0"/>
 </vector>
