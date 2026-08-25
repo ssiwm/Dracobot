@@ -58,14 +58,24 @@ fun GroupChatScreen(
         topBar = {
             TopAppBar(
                 title = {
-                    Column {
-                        Text(groupName, style = MaterialTheme.typography.titleMedium)
-                        Text(
-                            if (running) "boty deliberują…" else members.joinToString(", ") { "@${it.name}" },
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 1
-                        )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        // awatary czlonkow w naglowku — animowane gdy grupa deliberuje
+                        Row {
+                            members.take(3).forEach { m ->
+                                BotAvatar(m.name, 28.dp, working = running)
+                                Spacer(Modifier.width(2.dp))
+                            }
+                        }
+                        Spacer(Modifier.width(10.dp))
+                        Column {
+                            Text(groupName, style = MaterialTheme.typography.titleMedium)
+                            Text(
+                                if (running) "boty deliberują…" else members.joinToString(", ") { "@${it.name}" },
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1
+                            )
+                        }
                     }
                 },
                 navigationIcon = {

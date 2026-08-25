@@ -3,12 +3,13 @@ package eu.draconest.hermesbots.ui
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.size
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.produceState
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
-import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import kotlin.math.abs
@@ -18,8 +19,14 @@ import kotlin.math.sin
 /**
  * Blob avatar 1:1 z desktopowego Bot Mode (NousResearch/Hermes-Bot-Mode plugin.js):
  * - ksztalt deterministyczny z nazwy (hash*31), kolory z AVATAR_COLORS,
- * - ring probkowany wzorem: r = 16 + 1.7*sin(3a) + 0.7*cos(5a),
+ * - ring probkowany wzorem sampleFaceRing(),
  * - oczy (elipsy + blyski), ciemne cialo -> jasne oczy.
+ *
+ * ANIMACJA (port facePose() z plugin.js, rAF -> produceState @ 60fps):
+ * - idle:  delikatny sway (turn ±1.5°, roll ±1.2°) + mruganie co ~3.2 s,
+ * - work:  chylaca sie i kołysząca twarz (turn -11±8°, tilt ±8°, roll ±4.2°),
+ *          wędrujące spojrzenie (gazeX/Y sinusami), mruganie co ~1.45 s
+ *          i trzy pulsujace kropki "myślenia" pod twarza (fale przesunięte o 0.7 rad).
  */
 
 private val AVATAR_COLORS = listOf(
@@ -49,10 +56,46 @@ private fun colorFor(name: String): Color =
 private fun isDark(c: Color): Boolean =
     0.2126f * c.red + 0.7152f * c.green + 0.0722f * c.blue < 110f / 255f
 
+/** Pozа twarzy — port facePose(mood, t). */
+private data class FacePose(
+    val turn: Float,   // obrót głowy w osi Y (symulowany przez ściśnięcie X)
+    val tilt: Float,   // pochylenie przód/tył (ściśnięcie Y)
+    val roll: Float,   // przechył boczny (obrót 2D)
+    val gazeX: Float,
+    val gazeY: Float,
+    val blink: Boolean,
+    val d0: Float = 0f, // kropki pracy
+    val d1: Float = 0f,
+    val d2: Float = 0f
+)
+
+private fun facePose(working: Boolean, t: Float): FacePose {
+    if (working) {
+        return FacePose(
+            turn = -11f + sin(t * 0.48f) * 8f,
+            tilt = sin(t * 0.42f) * 8f + sin(t * 1.1f) * 1.6f,
+            roll = sin(t * 0.75f) * 4.2f,
+            gazeX = sin(t * 0.55f) * 3.6f,
+            gazeY = -1.6f + sin(t * 0.38f) * 2f,
+            blink = t % 1.45f > 1.26f,
+            d0 = 0.2f + 0.8f * maxOf(0f, sin(t * 2.6f)),
+            d1 = 0.2f + 0.8f * maxOf(0f, sin(t * 2.6f - 0.7f)),
+            d2 = 0.2f + 0.8f * maxOf(0f, sin(t * 2.6f - 1.4f))
+        )
+    }
+    return FacePose(
+        turn = sin(t * 0.5f) * 1.5f,
+        tilt = sin(t * 0.27f),
+        roll = sin(t * 0.85f) * 1.2f,
+        gazeX = 0f,
+        gazeY = 0f,
+        blink = t % 3.2f > 3.02f
+    )
+}
+
 /** Ring twarzy w boxie 40x40 — port sampleFaceRing() z plugin.js. */
 private fun faceRing(shape: String, steps: Int = 52): List<Offset> {
     if (shape == "cloud") {
-        // uproszczony cloud: trzy puffki (jak stary GitHub path)
         val pts = mutableListOf<Offset>()
         for (i in 0 until steps) {
             val a = (i.toFloat() / steps) * (2f * Math.PI.toFloat())
@@ -103,9 +146,21 @@ private fun faceRing(shape: String, steps: Int = 52): List<Offset> {
     return pts
 }
 
+/** projectFacePoint(): roll w 2D + symulacja obrotu 3D (sciśnięcie osi wg turn/tilt). */
+private fun projectPoint(x: Float, y: Float, pose: FacePose): Offset {
+    val dx = x - 20f
+    val dy = y - 20f
+    val r = Math.toRadians(pose.roll.toDouble())
+    val xr = (dx * cos(r) - dy * sin(r)).toFloat()
+    val yr = (dx * sin(r) + dy * cos(r)).toFloat()
+    val sx = 0.74f + 0.26f * abs(cos(Math.toRadians(pose.turn.toDouble()))).toFloat()
+    val sy = 0.80f + 0.20f * abs(cos(Math.toRadians(pose.tilt.toDouble()))).toFloat()
+    return Offset(20f + xr * sx, 20f + yr * sy)
+}
+
 /**
- * Twarz bota jak w desktopowym Bot Mode: kolorowe cialo (ksztalt z nazwy)
- * + dwoje oczu z blyskami. Statyczna klatka idle (bez animacji — MVP).
+ * Żywa twarz bota: idle oddycha i mruga; podczas pracy ("myślenia") kolyje się,
+ * rozglada i pulsuje trzema kropkami — jak na desktopowym Bot Mode.
  */
 @Composable
 fun BotAvatar(name: String, sizeDp: Dp = 44.dp, working: Boolean = false, modifier: Modifier = Modifier) {
@@ -116,38 +171,55 @@ fun BotAvatar(name: String, sizeDp: Dp = 44.dp, working: Boolean = false, modifi
     }
     val glintColor = remember { Color(255, 255, 255, 217) }
 
+    // zegar animacji — t sekund od startu kompozycji (jak performance.now()/1000 w pliginie)
+    val t by produceState(0f, working) {
+        val start = System.nanoTime()
+        while (true) {
+            value = ((System.nanoTime() - start) / 1_000_000_000f)
+            kotlinx.coroutines.delay(33) // ~30 fps wystarcza dla malutkich avatarów
+        }
+    }
+
+    val ring = remember(shape) { faceRing(shape) }
+
     Canvas(modifier = modifier.size(sizeDp)) {
         val scale = size.width / 40f
-        val ring = faceRing(shape)
+        val pose = facePose(working, t)
 
-        // cialo
+        // cialo (projekcja z roll/turn/tilt)
         val body = Path().apply {
             ring.forEachIndexed { i, p ->
-                val x = p.x * scale; val y = p.y * scale
+                val q = projectPoint(p.x, p.y, pose)
+                val x = q.x * scale; val y = q.y * scale
                 if (i == 0) moveTo(x, y) else lineTo(x, y)
             }
             close()
         }
         drawPath(body, bodyColor)
 
-        // oczy (cy 17.2, cx 15.4/24.6; praca = lekko powiekszone)
-        val eyeRy = if (working) 2.6f * scale else 2.3f * scale
-        val eyeRx = 2.2f * scale
-        val cy = (if (shape == "cloud") 22f else 17.2f) * scale
-        val l = Offset(15.4f * scale, cy)
-        val r = Offset(24.6f * scale, cy)
-        drawCircle(eyeColor, eyeRx, l)
-        drawCircle(eyeColor, eyeRx, r)
-        // blyski
-        drawCircle(glintColor, 0.65f * scale, Offset(l.x - 0.6f * scale, cy - 0.7f * scale))
-        drawCircle(glintColor, 0.65f * scale, Offset(r.x - 0.6f * scale, cy - 0.7f * scale))
+        // oczy + gaze
+        val eyeBaseY = (if (shape == "cloud") 22f else 17.2f) + pose.gazeY
+        val cy = eyeBaseY * scale
+        val l = Offset((15.4f + pose.gazeX) * scale, cy)
+        val r = Offset((24.6f + pose.gazeX) * scale, cy)
+        if (!pose.blink) {
+            val eyeRy = (if (working) 2.6f else 2.3f) * scale
+            drawOval(eyeColor, topLeft = Offset(l.x - 2.2f * scale, cy - eyeRy), size = androidx.compose.ui.geometry.Size(4.4f * scale, 2 * eyeRy))
+            drawOval(eyeColor, topLeft = Offset(r.x - 2.2f * scale, cy - eyeRy), size = androidx.compose.ui.geometry.Size(4.4f * scale, 2 * eyeRy))
+            drawCircle(glintColor, 0.65f * scale, Offset(l.x - 0.6f * scale, cy - 0.7f * scale))
+            drawCircle(glintColor, 0.65f * scale, Offset(r.x - 0.6f * scale, cy - 0.7f * scale))
+        } else {
+            // powieki zamkniete: poziome kreseciki (port data-hb-shut)
+            drawLine(eyeColor, Offset(l.x - 2.6f * scale, cy), Offset(l.x + 2.6f * scale, cy), strokeWidth = 2f * scale)
+            drawLine(eyeColor, Offset(r.x - 2.6f * scale, cy), Offset(r.x + 2.6f * scale, cy), strokeWidth = 2f * scale)
+        }
 
-        // kropki pracy pod twarza
+        // kropki myślenia pod twarza (tylko working)
         if (working) {
             val dotY = 41.2f * scale
-            drawCircle(bodyColor, 1.15f * scale, Offset(16.4f * scale, dotY))
-            drawCircle(bodyColor, 1.15f * scale, Offset(20f * scale, dotY))
-            drawCircle(bodyColor, 1.15f * scale, Offset(23.6f * scale, dotY))
+            drawCircle(bodyColor.copy(alpha = pose.d0.coerceIn(0f, 1f)), 1.15f * scale, Offset(16.4f * scale, dotY))
+            drawCircle(bodyColor.copy(alpha = pose.d1.coerceIn(0f, 1f)), 1.15f * scale, Offset(20f * scale, dotY))
+            drawCircle(bodyColor.copy(alpha = pose.d2.coerceIn(0f, 1f)), 1.15f * scale, Offset(23.6f * scale, dotY))
         }
     }
 }

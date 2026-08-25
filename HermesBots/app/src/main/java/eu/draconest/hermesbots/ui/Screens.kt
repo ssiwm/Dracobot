@@ -265,7 +265,7 @@ fun ChatScreen(
             TopAppBar(
                 title = {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        BotAvatar(bot.name, 36.dp)
+                        BotAvatar(bot.name, 36.dp, working = thinking)
                         Spacer(Modifier.size(10.dp))
                         Column {
                             Text(bot.name, style = MaterialTheme.typography.titleMedium)
