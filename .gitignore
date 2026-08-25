@@ -1,0 +1,35 @@
+# Sekrety i klucze — NIGDY nie commitować
+keystore.properties
+*.keystore
+*.jks
+google-services.json
+service-account*.json
+*firebase-adminsdk*
+fcm_tokens.json
+credentials.txt
+
+# Lokalne ścieżki SDK
+local.properties
+
+# Gradle / build
+.gradle/
+build/
+app/build/
+
+# IDE
+.idea/
+*.iml
+
+# Python (bridge/poc/watchdog)
+__pycache__/
+*.pyc
+venv/
+.venv/
+
+# Artefakty APK
+*.apk
+*.aab
+
+# Logi i stany
+*.log
+PLAN.md/

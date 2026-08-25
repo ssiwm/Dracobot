@@ -1,0 +1,73 @@
+plugins {
+    id("com.android.application")
+    id("org.jetbrains.kotlin.android")
+    id("org.jetbrains.kotlin.plugin.compose")
+    id("com.google.gms.google-services")
+}
+
+android {
+    namespace = "eu.draconest.hermesbots"
+    compileSdk = 34
+
+    defaultConfig {
+        applicationId = "eu.draconest.hermesbots"
+        minSdk = 26
+        targetSdk = 34
+        versionCode = 11
+        versionName = "0.7.0"
+    }
+
+    signingConfigs {
+        create("release") {
+            // Sekrety z keystore.properties (NIE commitowany — patrz .gitignore).
+            // Format pliku: storeFile=/sciezka/do.keystore, storePassword=..., keyAlias=..., keyPassword=...
+            val ksProps = java.util.Properties()
+            val ksFile = rootProject.file("keystore.properties")
+            if (ksFile.exists()) {
+                ksProps.load(ksFile.inputStream())
+                storeFile = file(ksProps.getProperty("storeFile"))
+                storePassword = ksProps.getProperty("storePassword")
+                keyAlias = ksProps.getProperty("keyAlias")
+                keyPassword = ksProps.getProperty("keyPassword")
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            isMinifyEnabled = false
+            signingConfig = signingConfigs.getByName("release")
+        }
+    }
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
+    kotlinOptions {
+        jvmTarget = "17"
+    }
+    buildFeatures {
+        compose = true
+        buildConfig = true
+    }
+}
+
+dependencies {
+    val composeBom = platform("androidx.compose:compose-bom:2024.09.02")
+    implementation(composeBom)
+
+    implementation("androidx.core:core-ktx:1.13.1")
+    implementation("androidx.activity:activity-compose:1.9.2")
+    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.6")
+    implementation("androidx.navigation:navigation-compose:2.8.1")
+
+    implementation("androidx.compose.ui:ui")
+    implementation("androidx.compose.ui:ui-tooling-preview")
+    implementation("androidx.compose.material3:material3")
+    debugImplementation("androidx.compose.ui:ui-tooling")
+
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
+    implementation("androidx.security:security-crypto:1.1.0-alpha06")
+    implementation("com.google.firebase:firebase-messaging-ktx:24.0.2")
+}
