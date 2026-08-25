@@ -130,6 +130,9 @@ private fun AppRoot(vm: AppViewModel = viewModel(), appStore: AppStore) {
     val groupRunning by vm.groupRunning.collectAsState()
     val creatingBot by vm.creatingBot.collectAsState()
     val rosterSummaries by vm.rosterSummaries.collectAsState()
+    val thinkingText by vm.thinkingText.collectAsState()
+    val statusText by vm.statusText.collectAsState()
+    val thinkingOpen by vm.thinkingOpen.collectAsState()
     var deleteCandidate by remember { mutableStateOf<eu.draconest.hermesbots.data.BotInfo?>(null) }
 
     // podlacz trwaly store + auto-connect + obserwacja linku WS
@@ -246,6 +249,10 @@ private fun AppRoot(vm: AppViewModel = viewModel(), appStore: AppStore) {
             bot = activeBot!!,
             messages = messages,
             thinking = thinking,
+            thinkingText = thinkingText,
+            statusText = statusText,
+            thinkingOpen = thinkingOpen,
+            onToggleThinking = vm::toggleThinking,
             offline = offline,
             onSend = vm::send,
             onBack = vm::closeChat,

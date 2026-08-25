@@ -32,6 +32,16 @@ class AppViewModel : ViewModel() {
     val messages = MutableStateFlow<List<ChatMessage>>(emptyList())
     val activeBot = MutableStateFlow<BotInfo?>(null)
     val thinking = MutableStateFlow(false)
+    /** Akumulowany tekst rozumowania (reasoning.delta) — podglad "myslenia". */
+    val thinkingText = MutableStateFlow("")
+    /** Status procesu (thinking.delta) — pojedyncza linia, gdy brak reasoning. */
+    val statusText = MutableStateFlow("")
+    val thinkingHasContent = MutableStateFlow(false)
+    /** Czy panel myslenia rozwiniety (user moze zwinac/rozwinac). */
+    val thinkingOpen = MutableStateFlow(true)
+    private var thinkingHistory = MutableStateFlow("")
+
+    fun toggleThinking() { thinkingOpen.value = !thinkingOpen.value }
     val sessions = MutableStateFlow<List<SessionInfo>>(emptyList())
     /** "offline" = zalogowani, ale WS padl (apka w tle itp.) */
     val offline = MutableStateFlow(false)
@@ -236,9 +246,35 @@ class AppViewModel : ViewModel() {
         eventsJob = viewModelScope.launch {
             client.events.collect { p ->
                 when (p.optString("type")) {
-                    "message.delta" -> appendDelta(p.optJSONObject("payload")?.optString("text") ?: "")
-                    "message.complete" -> finishMessage(p.optJSONObject("payload")?.optString("text"))
-                    "thinking.delta", "reasoning.delta" -> thinking.value = true
+                    "message.delta" -> {
+                        appendDelta(p.optJSONObject("payload")?.optString("text") ?: "")
+                        // odpowiedz ruszyła — chowamy podglad myslenia
+                        if (thinkingText.value.isNotBlank()) {
+                            thinkingHistory.value = thinkingText.value
+                            thinkingOpen.value = false
+                        }
+                    }
+                    "message.complete" -> {
+                        finishMessage(p.optJSONObject("payload")?.optString("text"))
+                        thinkingText.value = ""
+                    }
+                    "reasoning.delta" -> {
+                        // przyrost tekstu rozumowania (jak w CLI: _reasoning_buf += text)
+                        val t = p.optJSONObject("payload")?.optString("text") ?: return@collect
+                        if (t.isNotEmpty()) {
+                            thinkingText.value = (thinkingText.value + t).takeLast(8000)
+                            thinking.value = true
+                            thinkingHasContent.value = true
+                        }
+                    }
+                    "thinking.delta" -> {
+                        // status procesu ("Analizuję plik...", "Czekam na API...") — pelny tekst, nie kumulowany
+                        val t = p.optJSONObject("payload")?.optString("text") ?: return@collect
+                        if (t.isNotEmpty() && !thinkingHasContent.value) {
+                            statusText.value = t
+                        }
+                        thinking.value = true
+                    }
                 }
             }
         }
@@ -331,6 +367,11 @@ class AppViewModel : ViewModel() {
         val sid = sessionId
         if (sid == null) return
         messages.value += ChatMessage(ChatMessage.nextId(), fromUser = true, text = text)
+        // nowa tura: czysc podglad myslenia
+        thinkingText.value = ""
+        statusText.value = ""
+        thinkingHasContent.value = false
+        thinkingOpen.value = true
         val sent = client.submitPrompt(sid, text)
         if (sent) {
             thinking.value = true

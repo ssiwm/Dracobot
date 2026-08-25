@@ -1,6 +1,11 @@
 package eu.draconest.hermesbots.ui
 
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
@@ -291,6 +296,10 @@ fun ChatScreen(
     bot: BotInfo,
     messages: List<ChatMessage>,
     thinking: Boolean,
+    thinkingText: String = "",
+    statusText: String = "",
+    thinkingOpen: Boolean = true,
+    onToggleThinking: () -> Unit = {},
     offline: Boolean = false,
     onSend: (String) -> Unit,
     onBack: () -> Unit,
@@ -387,6 +396,17 @@ fun ChatScreen(
                 contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
+                // panel "myslenia": status procesu + akumulowany reasoning (zwijany)
+                if (thinking && (thinkingText.isNotBlank() || statusText.isNotBlank())) {
+                    item(key = "thinking-panel") {
+                        ThinkingPanel(
+                            reasoning = thinkingText,
+                            status = statusText,
+                            expanded = thinkingOpen,
+                            onToggle = onToggleThinking
+                        )
+                    }
+                }
                 items(messages.asReversed(), key = { it.id }) { msg ->
                     Bubble(
                         msg,
@@ -430,6 +450,71 @@ private fun Bubble(msg: ChatMessage, onLongPress: () -> Unit = {}) {
 @OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 private fun Modifier.combinedClickableCompat(onClick: () -> Unit = {}, onLongClick: () -> Unit = {}): Modifier =
     this.combinedClickable(onClick = onClick, onLongClick = onLongClick)
+
+/**
+ * Panel "myslenia" jak w desktopie: status procesu + akumulowany reasoning,
+ * zwijany (klik w naglowek). Rozwiniety pokazuje ostatnie ~10 linii reasoning.
+ */
+@Composable
+fun ThinkingPanel(
+    reasoning: String,
+    status: String,
+    expanded: Boolean,
+    onToggle: () -> Unit
+) {
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .background(
+                MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
+                RoundedCornerShape(16.dp)
+            )
+            .combinedClickableCompat(onClick = onToggle)
+            .padding(horizontal = 14.dp, vertical = 10.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            // pulsujaca kropka "pracuje"
+            val alpha = rememberInfiniteTransition(label = "pulse")
+                .animateFloat(
+                    initialValue = 0.35f, targetValue = 1f,
+                    animationSpec = infiniteRepeatable(
+                        animation = tween(700),
+                        repeatMode = RepeatMode.Reverse
+                    ), label = "a"
+                ).value
+
+            Box(
+                Modifier.size(8.dp).background(
+                    MaterialTheme.colorScheme.primary.copy(alpha = alpha), CircleShape
+                )
+            )
+            Spacer(Modifier.width(8.dp))
+            Text(
+                when {
+                    reasoning.isNotBlank() -> if (expanded) "Myśli — dotknij, by zwinąć" else "Myśli — dotknij, by rozwinąć"
+                    status.isNotBlank() -> status
+                    else -> "Myśli…"
+                },
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.weight(1f)
+            )
+        }
+        if (expanded && reasoning.isNotBlank()) {
+            Spacer(Modifier.height(6.dp))
+            // ostatnie linie reasoningu — pelna historia jest za dluga na telefon
+            val lines = reasoning.trim().lines()
+            val tail = lines.takeLast(12).joinToString("\n")
+            Text(
+                markdownToAnnotated(tail),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.85f),
+                maxLines = 14,
+                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+            )
+        }
+    }
+}
 
 /** Dialog potwierdzenia usunięcia bota. */
 @Composable
