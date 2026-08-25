@@ -28,14 +28,20 @@ jobs:
         env:
           KEYSTORE_B64: ${{ secrets.KEYSTORE_BASE64 }}
           KEYSTORE_PROPS: ${{ secrets.KEYSTORE_PROPERTIES }}
+          GOOGLE_SERVICES: ${{ secrets.GOOGLE_SERVICES_JSON }}
         run: |
           if [ -n "$KEYSTORE_B64" ]; then
             echo "$KEYSTORE_B64" | base64 -d > /home/runner/hermesbots.keystore
-            mkdir -p HermesBots
             printf '%s' "$KEYSTORE_PROPS" > HermesBots/keystore.properties
             echo "Keystore przywrocony z sekretow"
           else
             echo "Brak sekretow podpisu — release bedzie unsigned"
+          fi
+          # google-services.json jest wymagany przez wtyczke; bez niego build debug odpada.
+          if [ -n "$GOOGLE_SERVICES" ]; then
+            mkdir -p HermesBots/app
+            printf '%s' "$GOOGLE_SERVICES" > HermesBots/app/google-services.json
+            echo "google-services.json przywrocony z sekretow"
           fi
 
       - name: Build debug APK

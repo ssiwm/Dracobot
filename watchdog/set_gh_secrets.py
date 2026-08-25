@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Ustawia sekrety GitHub Actions (KEYSTORE_BASE64, KEYSTORE_PROPERTIES)
-uzywajac API szyfrowania libsodium (sealed box) na publicznym kluczu repo."""
+"""Ustawia sekrety GitHub Actions (KEYSTORE_BASE64, KEYSTORE_PROPERTIES,
+GOOGLE_SERVICES_JSON) przez libsodium sealed box na publicznym kluczu repo."""
 import base64
 import json
 import os
@@ -47,6 +47,12 @@ if __name__ == "__main__":
     keystore_b64 = base64.b64encode(
         open("/home/hermes/hermes-android-app/keystore/hermesbots.keystore", "rb").read()
     ).decode()
-    props = open("/home/hermes/hermes-android-app/HermesBots/keystore.properties").read()
     put_secret("KEYSTORE_BASE64", keystore_b64)
-    put_secret("KEYSTORE_PROPERTIES", props)
+    put_secret(
+        "KEYSTORE_PROPERTIES",
+        open("/home/hermes/hermes-android-app/HermesBots/keystore.properties").read(),
+    )
+    put_secret(
+        "GOOGLE_SERVICES_JSON",
+        open("/home/hermes/hermes-android-app/HermesBots/app/google-services.json").read(),
+    )
