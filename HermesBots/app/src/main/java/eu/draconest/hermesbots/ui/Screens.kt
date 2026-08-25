@@ -25,6 +25,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.DateRange
+import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -62,18 +63,71 @@ fun RosterScreen(
     onOpenGroup: (String) -> Unit,
     onNewGroup: () -> Unit,
     onDeleteGroup: (String) -> Unit = {},
-    onRefresh: () -> Unit = {}
+    onRefresh: () -> Unit = {},
+    onCreateBot: (String) -> Unit = {},
+    onDeleteBot: (String) -> Unit = {},
+    creatingBot: Boolean = false
 ) {
     val refreshing = remember { androidx.compose.runtime.mutableStateOf(false) }
     val refreshScope = androidx.compose.runtime.rememberCoroutineScope()
+    var showCreateBot by remember { mutableStateOf(false) }
+    var newName by remember { mutableStateOf("") }
+    var deleteCandidate by remember { mutableStateOf<BotInfo?>(null) }
     androidx.compose.runtime.LaunchedEffect(refreshing.value) {
         if (refreshing.value) {
             kotlinx.coroutines.delay(600)
             refreshing.value = false
         }
     }
-    Scaffold { pad ->
+    Scaffold(
+        floatingActionButton = {
+            androidx.compose.material3.ExtendedFloatingActionButton(
+                onClick = { showCreateBot = true },
+                shape = CircleShape,
+                containerColor = MaterialTheme.colorScheme.primary,
+                contentColor = MaterialTheme.colorScheme.onPrimary
+            ) {
+                Text(if (creatingBot) "Tworzę…" else "+ Bot")
+            }
+        }
+    ) { pad ->
         Column(Modifier.fillMaxSize().padding(pad)) {
+            // dialog tworzenia bota
+            if (showCreateBot) {
+                androidx.compose.material3.AlertDialog(
+                    onDismissRequest = { showCreateBot = false },
+                    title = { Text("Nowy bot") },
+                    text = {
+                        Column {
+                            Text("Nazwa profilu: małe litery, cyfry, - _ (max 64).",
+                                style = MaterialTheme.typography.bodySmall)
+                            Spacer(Modifier.height(8.dp))
+                            OutlinedTextField(
+                                value = newName,
+                                onValueChange = { newName = it },
+                                singleLine = true,
+                                label = { Text("np. research-bot") }
+                            )
+                            Spacer(Modifier.height(4.dp))
+                            Text("Bot dostanie kopię umiejętności i dostęp do modelu.",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    },
+                    confirmButton = {
+                        Button(onClick = {
+                            onCreateBot(newName.trim())
+                            newName = ""
+                            showCreateBot = false
+                        }, enabled = newName.isNotBlank()) { Text("Utwórz") }
+                    },
+                    dismissButton = {
+                        androidx.compose.material3.TextButton(onClick = { showCreateBot = false }) {
+                            Text("Anuluj")
+                        }
+                    }
+                )
+            }
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier.fillMaxWidth().padding(start = 20.dp, end = 12.dp)
@@ -146,7 +200,9 @@ fun RosterScreen(
                         modifier = Modifier
                             .fillMaxWidth()
                             .padding(horizontal = 16.dp, vertical = 6.dp)
-                            .clickable { onOpen(bot) }
+                            .combinedClickableCompat(onClick = { onOpen(bot) }, onLongClick = {
+                                if (bot.name != "default") deleteCandidate = bot
+                            })
                     ) {
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
@@ -320,5 +376,25 @@ private fun Bubble(msg: ChatMessage, onLongPress: () -> Unit = {}) {
 
 /** combinedClickable wymaga ExperimentalFoundationApi — opakowanie. */
 @OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
-private fun Modifier.combinedClickableCompat(onLongPress: () -> Unit): Modifier =
-    this.combinedClickable(onClick = {}, onLongClick = onLongPress)
+private fun Modifier.combinedClickableCompat(onClick: () -> Unit = {}, onLongClick: () -> Unit = {}): Modifier =
+    this.combinedClickable(onClick = onClick, onLongClick = onLongClick)
+
+/** Dialog potwierdzenia usunięcia bota. */
+@Composable
+fun DeleteBotDialog(botName: String, onConfirm: () -> Unit, onDismiss: () -> Unit) {
+    androidx.compose.material3.AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Usunąć bota?") },
+        text = {
+            Text("Bot \"$botName\" zostanie trwale usunięty razem z pamięcią, historią rozmów i plikami profilu. Tej operacji nie można cofnąć.")
+        },
+        confirmButton = {
+            Button(onClick = { onConfirm(); onDismiss() }) {
+                Text("Usuń", color = MaterialTheme.colorScheme.error)
+            }
+        },
+        dismissButton = {
+            androidx.compose.material3.TextButton(onClick = onDismiss) { Text("Anuluj") }
+        }
+    )
+}

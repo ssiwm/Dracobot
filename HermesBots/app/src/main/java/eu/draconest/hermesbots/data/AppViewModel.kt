@@ -356,6 +356,7 @@ class AppViewModel : ViewModel() {
     // ---- Routines ----
 
     val routines = MutableStateFlow<List<RoutineInfo>>(emptyList())
+    val creatingBot = MutableStateFlow(false)
     private var showRoutines = false
 
     /** Czy pokazujemy panel Routines zamiast rozmow (stan UI). */
@@ -427,6 +428,42 @@ class AppViewModel : ViewModel() {
                 bots.value = client.listProfiles()
                 refreshGroupsList()
             } catch (_: Exception) { /* cicho — pull-refresh nie krzyczy */ }
+        }
+    }
+
+    // ---- Tworzenie / usuwanie botów (REST /api/profiles) ----
+
+    /** Utwórz bota: klon umiejętności z profilu default + mirror credentials
+     *  (bot dostaje dostep do modelu od razu). Nazwa: [a-z0-9][a-z0-9_-]{0,63}. */
+    fun createBot(rawName: String) {
+        val name = rawName.trim().lowercase()
+        if (!Regex("^[a-z0-9][a-z0-9_-]{0,63}$").matches(name)) {
+            connectionError.value = "Nazwa: małe litery/cyfry/-/_ (max 64), zaczyna się literą lub cyfrą"
+            return
+        }
+        creatingBot.value = true
+        viewModelScope.launch {
+            try {
+                client.createBot(name)
+                bots.value = client.listProfiles()
+                connectionError.value = null
+            } catch (e: Exception) {
+                connectionError.value = "Nie udało się utworzyć bota: ${e.message}"
+            } finally {
+                creatingBot.value = false
+            }
+        }
+    }
+
+    /** Usuń bota (po potwierdzeniu w UI). Default jest chroniony po stronie serwera. */
+    fun deleteBot(name: String) {
+        viewModelScope.launch {
+            try {
+                client.deleteBot(name)
+                bots.value = client.listProfiles()
+            } catch (e: Exception) {
+                connectionError.value = "Nie udało się usunąć bota: ${e.message}"
+            }
         }
     }
 

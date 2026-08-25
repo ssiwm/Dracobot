@@ -11,6 +11,7 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import okhttp3.Call
 import okhttp3.Callback
 import okhttp3.OkHttpClient
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Request
 import okhttp3.Response
 import okhttp3.WebSocket
@@ -329,6 +330,37 @@ class GatewayClient(private val ok: OkHttpClient = OkHttpClient()) {
 
     /** Niskopoziomowe RPC dla GroupChatEngine. */
     suspend fun rpcRaw(method: String, params: JSONObject): JSONObject = rpc(method, params)
+
+    /** Utwórz bota przez REST POST /api/profiles (klon z mirror credentials). */
+    suspend fun createBot(name: String) {
+        val token = fetchToken()
+        val json = JSONObject().put("name", name).put("mirror_credentials", true)
+        val req = okhttp3.Request.Builder()
+            .url("$baseUrl/api/profiles")
+            .post(okhttp3.RequestBody.create("application/json".toMediaType(), json.toString()))
+            .apply { basicAuth?.let { header("Authorization", it) } }
+            .header("X-Hermes-Session-Token", token)
+            .header("User-Agent", "HermesBots/0.10")
+            .build()
+        http.newCall(req).await().use { resp ->
+            check(resp.isSuccessful) { "HTTP ${resp.code}" }
+        }
+    }
+
+    /** Usuń bota przez REST DELETE /api/profiles/{name}. */
+    suspend fun deleteBot(name: String) {
+        val token = fetchToken()
+        val req = okhttp3.Request.Builder()
+            .url("$baseUrl/api/profiles/$name")
+            .delete()
+            .apply { basicAuth?.let { header("Authorization", it) } }
+            .header("X-Hermes-Session-Token", token)
+            .header("User-Agent", "HermesBots/0.10")
+            .build()
+        http.newCall(req).await().use { resp ->
+            check(resp.isSuccessful) { "HTTP ${resp.code}" }
+        }
+    }
 
     private suspend fun Call.await(): Response = suspendCancellableCoroutine { cont ->
         enqueue(object : Callback {

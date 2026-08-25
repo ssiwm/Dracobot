@@ -20,8 +20,8 @@ android {
         applicationId = "eu.draconest.hermesbots"
         minSdk = 26
         targetSdk = 34
-        versionCode = 15
-        versionName = "0.9.0"
+        versionCode = 16
+        versionName = "1.0.0"
     }
 
     signingConfigs {

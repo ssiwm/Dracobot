@@ -40,6 +40,7 @@ import eu.draconest.hermesbots.data.CrashGuard
 import eu.draconest.hermesbots.data.HermesMessagingService
 import eu.draconest.hermesbots.ui.ChatScreen
 import eu.draconest.hermesbots.ui.ConnectScreen
+import eu.draconest.hermesbots.ui.DeleteBotDialog
 import eu.draconest.hermesbots.ui.GroupChatScreen
 import eu.draconest.hermesbots.ui.GroupCreateScreen
 import eu.draconest.hermesbots.ui.RosterScreen
@@ -127,6 +128,8 @@ private fun AppRoot(vm: AppViewModel = viewModel(), appStore: AppStore) {
     val activeGroup by vm.activeGroup.collectAsState()
     val groupLog by vm.groupLog.collectAsState()
     val groupRunning by vm.groupRunning.collectAsState()
+    val creatingBot by vm.creatingBot.collectAsState()
+    var deleteCandidate by remember { mutableStateOf<eu.draconest.hermesbots.data.BotInfo?>(null) }
 
     // podlacz trwaly store + auto-connect + obserwacja linku WS
     remember {
@@ -195,14 +198,26 @@ private fun AppRoot(vm: AppViewModel = viewModel(), appStore: AppStore) {
             onCreate = { name, members -> creatingGroup = false; vm.createGroup(name, members) },
             onBack = { creatingGroup = false }
         )
-        activeBot == null && activeGroup == null -> RosterScreen(
-            bots = bots,
-            groups = groups,
-            onOpen = vm::openChat,
-            onOpenGroup = vm::openGroup,
-            onNewGroup = { creatingGroup = true },
-            onRefresh = vm::refreshRoster
-        )
+        activeBot == null && activeGroup == null -> {
+            RosterScreen(
+                bots = bots,
+                groups = groups,
+                onOpen = vm::openChat,
+                onOpenGroup = vm::openGroup,
+                onNewGroup = { creatingGroup = true },
+                onRefresh = vm::refreshRoster,
+                onCreateBot = vm::createBot,
+                onDeleteBot = { name -> deleteCandidate = bots.firstOrNull { it.name == name } },
+                creatingBot = creatingBot
+            )
+            deleteCandidate?.let { cand ->
+                DeleteBotDialog(
+                    botName = cand.name,
+                    onConfirm = { vm.deleteBot(cand.name) },
+                    onDismiss = { deleteCandidate = null }
+                )
+            }
+        }
         activeGroup != null -> GroupChatScreen(
             groupName = activeGroup!!,
             members = bots.filter { it.name != "default" },
