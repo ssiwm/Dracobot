@@ -419,13 +419,9 @@ private fun Bubble(msg: ChatMessage, onLongPress: () -> Unit = {}) {
                 .background(bg.value, RoundedCornerShape(24.dp))
                 .padding(14.dp)
         ) {
-            // Markdown (bold/italic/code/linki/listy/naglowki) — user dostaje czysty plain,
-            // bot mowi markdownem; renderujemy bogato.
-            val shown = msg.text + if (msg.streaming) "▍" else ""
-            Text(
-                markdownToAnnotated(shown),
-                color = MaterialTheme.colorScheme.onSurface
-            )
+            // Markdown poziom blokowy: kod, tabele, naglowki, listy, cytaty.
+            val shown = (msg.text + if (msg.streaming) "▍" else "")
+            MarkdownContent(shown, textColor = MaterialTheme.colorScheme.onSurface)
         }
     }
 }

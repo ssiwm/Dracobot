@@ -150,12 +150,12 @@ fun GroupChatScreen(
                                 val bg = animateColorAsState(
                                     MaterialTheme.colorScheme.surfaceVariant, label = "g"
                                 )
-                                Text(
-                                    markdownToAnnotated(entry.text),
-                                    modifier = Modifier.background(bg.value, RoundedCornerShape(20.dp))
-                                        .padding(12.dp),
-                                    color = MaterialTheme.colorScheme.onSurface
-                                )
+                                Column(
+                                    Modifier.background(bg.value, RoundedCornerShape(20.dp))
+                                        .padding(12.dp)
+                                ) {
+                                    MarkdownContent(entry.text, textColor = MaterialTheme.colorScheme.onSurface)
+                                }
                             }
                         }
                     }
