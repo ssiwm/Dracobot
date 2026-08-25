@@ -4,7 +4,12 @@ plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
-    id("com.google.gms.google-services")
+}
+
+// Google Services stosowany warunkowo — wymaga app/google-services.json (nie commitowany).
+// Bez pliku apka buduje sie i dziala, tylko push FCM jest nieaktywny.
+if (file("google-services.json").exists()) {
+    apply(plugin = "com.google.gms.google-services")
 }
 
 android {
