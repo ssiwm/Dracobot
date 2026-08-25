@@ -38,24 +38,14 @@ jobs:
             echo "Brak sekretow podpisu — release bedzie unsigned"
           fi
 
-      - name: Grant execute for gradlew wrapper bootstrap
-        run: mkdir -p HermesBots/gradle/wrapper
-
       - name: Build debug APK
         working-directory: HermesBots
-        run: |
-          gradle assembleDebug --no-daemon || {
-            curl -sL https://services.gradle.org/distributions/gradle-8.9-bin.zip -o /tmp/g.zip
-            unzip -q /tmp/g.zip -d /tmp
-            /tmp/gradle-8.9/bin/gradle assembleDebug --no-daemon
-          }
+        run: ./gradlew assembleDebug --no-daemon
 
       - name: Build release APK (signed gdy sa sekrety)
         if: startsWith(github.ref, 'refs/tags/v')
         working-directory: HermesBots
-        run: |
-          GRADLE_CMD="assembleRelease --no-daemon"
-          if command -v gradle >/dev/null; then gradle $GRADLE_CMD; else /tmp/gradle-8.9/bin/gradle $GRADLE_CMD; fi
+        run: ./gradlew assembleRelease --no-daemon
 
       - name: Upload debug APK artifact
         uses: actions/upload-artifact@v4

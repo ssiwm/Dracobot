@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -21,7 +23,7 @@ android {
         create("release") {
             // Sekrety z keystore.properties (NIE commitowany — patrz .gitignore).
             // Format pliku: storeFile=/sciezka/do.keystore, storePassword=..., keyAlias=..., keyPassword=...
-            val ksProps = java.util.Properties()
+            val ksProps = Properties()
             val ksFile = rootProject.file("keystore.properties")
             if (ksFile.exists()) {
                 ksProps.load(ksFile.inputStream())
