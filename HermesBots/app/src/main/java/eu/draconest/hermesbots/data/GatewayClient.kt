@@ -305,6 +305,31 @@ class GatewayClient(private val ok: OkHttpClient = OkHttpClient()) {
             .put("profile", profile))
     }
 
+    /** Resume + stan tury (dla GroupChatEngine): liczba wiadomosci, ostatni assistant, inflight. */
+    suspend fun resumeSessionState(profile: String, sessionId: String): GroupChatEngine.TurnState {
+        val res = rpc("session.resume", JSONObject()
+            .put("session_id", sessionId).put("profile", profile).put("cols", 80))
+        val msgs = res.optJSONArray("messages")
+        var count = res.optInt("message_count", 0)
+        var lastAssistant: String? = null
+        if (msgs != null) {
+            count = maxOf(count, msgs.length())
+            for (i in msgs.length() - 1 downTo 0) {
+                val m = msgs.optJSONObject(i) ?: continue
+                if (m.optString("role") == "assistant") {
+                    val t = if (m.has("text")) m.optString("text") else m.optString("content")
+                    if (t.isNotBlank()) { lastAssistant = t; break }
+                }
+            }
+        }
+        val inflight = res.optJSONObject("inflight")?.let { it.length() > 0 } ?: false
+        return GroupChatEngine.TurnState(count, lastAssistant, inflight,
+            res.optBoolean("running", false))
+    }
+
+    /** Niskopoziomowe RPC dla GroupChatEngine. */
+    suspend fun rpcRaw(method: String, params: JSONObject): JSONObject = rpc(method, params)
+
     private suspend fun Call.await(): Response = suspendCancellableCoroutine { cont ->
         enqueue(object : Callback {
             override fun onFailure(call: Call, e: IOException) {

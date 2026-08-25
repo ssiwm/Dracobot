@@ -56,16 +56,70 @@ import eu.draconest.hermesbots.data.ChatMessage
 @Composable
 fun RosterScreen(
     bots: List<BotInfo>,
-    onOpen: (BotInfo) -> Unit
+    groups: List<String>,
+    onOpen: (BotInfo) -> Unit,
+    onOpenGroup: (String) -> Unit,
+    onNewGroup: () -> Unit,
+    onDeleteGroup: (String) -> Unit = {}
 ) {
     Scaffold { pad ->
         Column(Modifier.fillMaxSize().padding(pad)) {
-            Text(
-                "Boty",
-                style = MaterialTheme.typography.headlineLarge,
-                modifier = Modifier.padding(start = 20.dp, top = 16.dp, bottom = 12.dp)
-            )
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth().padding(start = 20.dp, end = 12.dp)
+            ) {
+                Text("Boty", style = MaterialTheme.typography.headlineLarge,
+                    modifier = Modifier.weight(1f))
+                IconButton(onClick = onNewGroup) {
+                    Icon(Icons.Filled.DateRange, "Nowa grupa botów")
+                }
+            }
             LazyColumn(Modifier.fillMaxSize()) {
+                // --- sekcja grup ---
+                if (groups.isNotEmpty()) {
+                    item {
+                        Text("Grupy", style = MaterialTheme.typography.titleSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(start = 20.dp, top = 8.dp, bottom = 4.dp))
+                    }
+                    items(groups, key = { "grp_$it" }) { g ->
+                        Card(
+                            shape = RoundedCornerShape(28.dp),
+                            colors = CardDefaults.cardColors(
+                                containerColor = MaterialTheme.colorScheme.secondaryContainer
+                            ),
+                            modifier = Modifier.fillMaxWidth()
+                                .padding(horizontal = 16.dp, vertical = 5.dp)
+                                .clickable { onOpenGroup(g) }
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.padding(16.dp)) {
+                                Text("👥 ${g}", style = MaterialTheme.typography.titleSmall,
+                                    modifier = Modifier.weight(1f))
+                                Text(
+                                    "otwórz",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                            }
+                        }
+                    }
+                } else {
+                    item {
+                        Text(
+                            "Grupy: utwórz ikoną 📅 powyżej",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(start = 20.dp, bottom = 4.dp)
+                        )
+                    }
+                }
+                // --- sekcja boty ---
+                item {
+                    Text("Boty", style = MaterialTheme.typography.titleSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(start = 20.dp, top = 8.dp, bottom = 4.dp))
+                }
                 items(bots, key = { it.name }) { bot ->
                     Card(
                         shape = RoundedCornerShape(28.dp),

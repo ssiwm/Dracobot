@@ -397,8 +397,101 @@ class AppViewModel : ViewModel() {
         }
     }
 
-    override fun onCleared() {
-        client.close()
-        super.onCleared()
+    // ---- Grupy botów ----
+
+    val groups = MutableStateFlow<List<String>>(emptyList())
+    val activeGroup = MutableStateFlow<String?>(null)
+    val groupLog = MutableStateFlow<List<GroupChatEngine.Entry>>(emptyList())
+    val groupRunning = MutableStateFlow(false)
+
+    private var groupEpoch = 0
+
+    /** Tworzy grupe z wybranych botow (2-6). */
+    fun createGroup(name: String, members: List<BotInfo>) {
+        val safeName = name.trim().ifBlank { "Grupa" }
+        GroupChatEngine.room(safeName) // inicjalizuj
+        refreshGroupsList()
+        openGroup(safeName)
+        // preseed czlonkow w metadanych pokoju (log pusty)
+    }
+
+    fun refreshGroupsList() {
+        groups.value = GroupChatEngine.roomNames().sorted()
+    }
+
+    fun deleteGroup(name: String) {
+        // lokalnie: usuwamy pokoj (sesje botow zostaja na serwerze — historia trwa)
+        GroupChatEngine.removeRoom(name)
+        if (activeGroup.value == name) closeGroup()
+        refreshGroupsList()
+    }
+
+    fun openGroup(name: String) {
+        activeGroup.value = name
+        _viewRoutines.value = false
+        sessions.value = emptyList()
+        groupLog.value = GroupChatEngine.room(name).log.toList()
+    }
+
+    fun closeGroup() {
+        activeGroup.value = null
+        groupLog.value = emptyList()
+    }
+
+    /** Wyslij wiadomosc usera do pokoju i uruchom seryjne rundy botow. */
+    fun sendToGroup(text: String) {
+        val group = activeGroup.value ?: return
+        val members = bots.value.filter { it.name != "default" }.take(GroupChatEngine.MAX_MEMBERS)
+        if (members.isEmpty()) return
+        val room = GroupChatEngine.room(group)
+        room.log.add(GroupChatEngine.Entry("user", "Ty", text.trim(), System.currentTimeMillis() / 1000))
+        groupLog.value = room.log.toList()
+        groupEpoch += 1
+
+        if (!room.running) {
+            room.running = true
+            groupRunning.value = true
+            viewModelScope.launch { runGroupRounds(group, members, groupEpoch) }
+        }
+    }
+
+    private suspend fun runGroupRounds(group: String, members: List<BotInfo>, myEpoch: Int) {
+        val room = GroupChatEngine.room(group)
+        var posted = 0
+        try {
+            for (round in 0 until GroupChatEngine.MAX_ROUNDS) {
+                val responders = GroupChatEngine.rotate(
+                    GroupChatEngine.resolveResponders(room.log, members), round)
+                var spoke = 0
+                for (member in responders) {
+                    if (groupEpoch != myEpoch || posted >= GroupChatEngine.MAX_MESSAGES) return
+                    val seen = room.watermarks[member.name] ?: 0
+                    val delta = room.log.drop(seen)
+                    if (delta.isEmpty()) continue
+
+                    val prompt = GroupChatEngine.turnPrompt(group, members, member, delta)
+                    val reply = try {
+                        kotlinx.coroutines.withTimeout(GroupChatEngine.TURN_TIMEOUT_MS + 5_000) {
+                            GroupChatEngine.runMemberTurn(client, group, member, prompt)
+                        }
+                    } catch (_: Exception) { null }
+
+                    room.watermarks[member.name] = room.log.size
+                    if (!reply.isNullOrBlank() && !GroupChatEngine.isPass(reply)) {
+                        room.log.add(GroupChatEngine.Entry("member", member.name, reply.trim(),
+                            System.currentTimeMillis() / 1000))
+                        room.watermarks[member.name] = room.log.size
+                        groupLog.value = room.log.toList()
+                        posted += 1; spoke += 1
+                    }
+                }
+                if (spoke == 0) return // wszyscy pass — rozmowa osiadla
+            }
+        } finally {
+            if (groupEpoch == myEpoch) {
+                room.running = false
+                groupRunning.value = false
+            }
+        }
     }
 }

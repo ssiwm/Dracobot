@@ -40,6 +40,8 @@ import eu.draconest.hermesbots.data.CrashGuard
 import eu.draconest.hermesbots.data.HermesMessagingService
 import eu.draconest.hermesbots.ui.ChatScreen
 import eu.draconest.hermesbots.ui.ConnectScreen
+import eu.draconest.hermesbots.ui.GroupChatScreen
+import eu.draconest.hermesbots.ui.GroupCreateScreen
 import eu.draconest.hermesbots.ui.RosterScreen
 import eu.draconest.hermesbots.ui.RoutinesScreen
 import eu.draconest.hermesbots.ui.SessionPickerScreen
@@ -121,6 +123,10 @@ private fun AppRoot(vm: AppViewModel = viewModel(), appStore: AppStore) {
     val sessions by vm.sessions.collectAsState()
     val routines by vm.routines.collectAsState()
     val viewRoutines by vm.viewRoutines.collectAsState()
+    val groups by vm.groups.collectAsState()
+    val activeGroup by vm.activeGroup.collectAsState()
+    val groupLog by vm.groupLog.collectAsState()
+    val groupRunning by vm.groupRunning.collectAsState()
 
     // podlacz trwaly store + auto-connect + obserwacja linku WS
     remember {
@@ -152,6 +158,7 @@ private fun AppRoot(vm: AppViewModel = viewModel(), appStore: AppStore) {
     var url by remember { mutableStateOf(appStore.url) }
     var username by remember { mutableStateOf(appStore.username) }
     var password by remember { mutableStateOf("") }
+    var creatingGroup by remember { mutableStateOf(false) }
 
     when {
         !connected -> ConnectScreen(
@@ -166,7 +173,27 @@ private fun AppRoot(vm: AppViewModel = viewModel(), appStore: AppStore) {
             busy = connecting,
             onConnect = { vm.connect(url, username, password) }
         )
-        activeBot == null -> RosterScreen(bots = bots, onOpen = vm::openChat)
+        creatingGroup -> GroupCreateScreen(
+            bots = bots,
+            onCreate = { name, members -> creatingGroup = false; vm.createGroup(name, members) },
+            onBack = { creatingGroup = false }
+        )
+        activeBot == null && activeGroup == null -> RosterScreen(
+            bots = bots,
+            groups = groups,
+            onOpen = vm::openChat,
+            onOpenGroup = vm::openGroup,
+            onNewGroup = { creatingGroup = true }
+        )
+        activeGroup != null -> GroupChatScreen(
+            groupName = activeGroup!!,
+            members = bots.filter { it.name != "default" },
+            log = groupLog,
+            running = groupRunning,
+            offline = offline,
+            onSend = vm::sendToGroup,
+            onBack = vm::closeGroup
+        )
         viewRoutines -> RoutinesScreen(
             bot = activeBot!!,
             routines = routines,
