@@ -72,7 +72,7 @@ fun RosterScreen(
     val refreshScope = androidx.compose.runtime.rememberCoroutineScope()
     var showCreateBot by remember { mutableStateOf(false) }
     var newName by remember { mutableStateOf("") }
-    var deleteCandidate by remember { mutableStateOf<BotInfo?>(null) }
+    val haptic = androidx.compose.ui.platform.LocalHapticFeedback.current
     androidx.compose.runtime.LaunchedEffect(refreshing.value) {
         if (refreshing.value) {
             kotlinx.coroutines.delay(600)
@@ -201,7 +201,10 @@ fun RosterScreen(
                             .fillMaxWidth()
                             .padding(horizontal = 16.dp, vertical = 6.dp)
                             .combinedClickableCompat(onClick = { onOpen(bot) }, onLongClick = {
-                                if (bot.name != "default") deleteCandidate = bot
+                                if (bot.name != "default") {
+                                    haptic.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.LongPress)
+                                    onDeleteBot(bot.name)
+                                }
                             })
                     ) {
                         Row(
