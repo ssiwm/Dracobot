@@ -46,6 +46,12 @@ keyAlias=hermesbots
 keyPassword=...
 ```
 
+### Release'y
+
+Oficjalne, podpisane APK-i budowane są **lokalnie** (keystore nigdy nie opuszcza serwera
+builda). CI na GitHub Actions buduje debug-APK przy każdym pushu do `main`
+(artefakt w zakładce Actions) i służy weryfikacji kompilacji.
+
 ## Push FCM (opcjonalny)
 
 1. Projekt Firebase + `app/google-services.json` (nie commitowany — wstaw własny)
