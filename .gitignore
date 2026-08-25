@@ -32,4 +32,6 @@ venv/
 
 # Logi i stany
 *.log
-PLAN.md/
+
+# Wewnętrzne notatki (IP serwera, dane infrastruktury)
+PLAN.md
