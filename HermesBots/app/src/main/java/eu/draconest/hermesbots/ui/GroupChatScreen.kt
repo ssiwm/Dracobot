@@ -151,9 +151,10 @@ fun GroupChatScreen(
                                     MaterialTheme.colorScheme.surfaceVariant, label = "g"
                                 )
                                 Text(
-                                    entry.text,
+                                    markdownToAnnotated(entry.text),
                                     modifier = Modifier.background(bg.value, RoundedCornerShape(20.dp))
-                                        .padding(12.dp)
+                                        .padding(12.dp),
+                                    color = MaterialTheme.colorScheme.onSurface
                                 )
                             }
                         }
