@@ -160,6 +160,23 @@ private fun AppRoot(vm: AppViewModel = viewModel(), appStore: AppStore) {
     var password by remember { mutableStateOf("") }
     var creatingGroup by remember { mutableStateOf(false) }
 
+    // Systemowy back: z ekranow wewnetrznych wraca do rosteru, na rostrze — normalne zachowanie.
+    // (Bez tego gesture-back zamykal apke zamiast wrocic do wyboru bota.)
+    androidx.activity.compose.BackHandler(enabled = connected) {
+        when {
+            creatingGroup -> creatingGroup = false
+            activeGroup != null -> vm.closeGroup()
+            viewRoutines -> vm.closeRoutines()
+            sessions.isNotEmpty() || activeBot != null -> vm.closeChat()
+        }
+    }
+
+    // Przywroc ostatnia rozmowe przy starcie (juz robi to autoConnect->restoreLastBot);
+    // tu tylko odswiez liste grup.
+    androidx.compose.runtime.LaunchedEffect(connected) {
+        if (connected) vm.refreshGroupsList()
+    }
+
     when {
         !connected -> ConnectScreen(
             url = url,
