@@ -83,20 +83,37 @@ def fetch_new_assistant_messages(bot: str):
     return out
 
 
+def subprocess_count_ws() -> int:
+    """Liczba ESTAB polaczen WS do dashboardu :9119 (port hex 239F).
+
+    Apka laczy sie przez cloudflared -> caddy -> 127.0.0.1:9119, wiec z perspektywy
+    systemu jej WS jest LOKALNYM polaczeniem 127.0.0.1 -> 127.0.0.1:9119.
+    Czytamy /proc/net/tcp(6) bezposrednio — ss bywa zawodny.
+    """
+    count = 0
+    for path in ("/proc/net/tcp", "/proc/net/tcp6"):
+        try:
+            with open(path) as f:
+                next(f)  # naglowek
+                for line in f:
+                    parts = line.split()
+                    if len(parts) < 4:
+                        continue
+                    remote, state = parts[2], parts[3]
+                    # 239F = 9119; stan 01 = ESTAB; pomiń gniazdo nasłuchujące
+                    if remote.endswith(":239F") and state == "01":
+                        count += 1
+        except OSError:
+            continue
+    return count
+
+
 def app_is_open() -> bool:
-    """Czy ktos ma otwarta apke (aktywne WS do dashboardu poza naszymi procesami)?"""
+    """Apka otwarta <=> istnieje aktywne WS do :9119."""
     try:
-        out = subprocess_count_ws()
-        return out > 1  # dashboard sam ma wewnetrzne polaczenia PTY-side
+        return subprocess_count_ws() > 0
     except Exception:
         return False
-
-
-def subprocess_count_ws() -> int:
-    import subprocess
-    r = subprocess.run(["ss", "-tn"], capture_output=True, text=True, timeout=10)
-    return sum(1 for line in r.stdout.splitlines()
-               if ":9119" in line and "ESTAB" in line and "127.0.0.1" not in line.split()[4].rsplit(":", 1)[0])
 
 
 _fcm_app = None
