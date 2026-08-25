@@ -35,7 +35,16 @@ data class SessionInfo(
     val title: String,
     val preview: String,
     val messageCount: Int,
-    val startedAt: Long
+    val startedAt: Long,
+    val lastActive: Long = 0
+)
+
+/** Podsumowanie rozmów profilu dla karty na rosterze. */
+data class RosterSummary(
+    val chatCount: Int,
+    val newestTitle: String,
+    val newestPreview: String,
+    val newestActiveAt: Long
 )
 
 data class RoutineInfo(
@@ -214,13 +223,31 @@ class GatewayClient(private val ok: OkHttpClient = OkHttpClient()) {
                     title = o.optString("title").ifBlank { "(bez tytułu)" },
                     preview = o.optString("preview"),
                     messageCount = o.optInt("message_count", 0),
-                    startedAt = o.optLong("started_at", 0)
+                    startedAt = o.optLong("started_at", 0),
+                    lastActive = o.optLong("last_active", 0)
                 )
             }
         }.filter { it.messageCount > 0 || it.preview.isNotBlank() }
             // szum: sesje cron/scheduler nie sa rozmowami uzytkownika
             .filter { !it.id.startsWith("cron_") && !it.preview.startsWith("[IMPORTANT") }
     }
+
+    /** Podsumowanie aktywnosci profilu dla rosteru: liczba rozmów + najnowsza. */
+    suspend fun rosterSummary(profile: String): RosterSummary? =
+        try {
+            val sessions = listSessions(profile)
+            if (sessions.isEmpty()) null else {
+                val newest = sessions.maxBy { maxOf(it.lastActive, it.startedAt) }
+                RosterSummary(
+                    chatCount = sessions.size,
+                    newestTitle = newest.title,
+                    newestPreview = newest.preview,
+                    newestActiveAt = maxOf(newest.lastActive, newest.startedAt)
+                )
+            }
+        } catch (_: Exception) {
+            null
+        }
 
     /**
      * Wznawia istniejącą rozmowę i zwraca (nowe session_id runtime, historia).

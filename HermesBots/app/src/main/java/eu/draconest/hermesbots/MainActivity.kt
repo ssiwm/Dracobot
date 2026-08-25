@@ -129,6 +129,7 @@ private fun AppRoot(vm: AppViewModel = viewModel(), appStore: AppStore) {
     val groupLog by vm.groupLog.collectAsState()
     val groupRunning by vm.groupRunning.collectAsState()
     val creatingBot by vm.creatingBot.collectAsState()
+    val rosterSummaries by vm.rosterSummaries.collectAsState()
     var deleteCandidate by remember { mutableStateOf<eu.draconest.hermesbots.data.BotInfo?>(null) }
 
     // podlacz trwaly store + auto-connect + obserwacja linku WS
@@ -202,6 +203,7 @@ private fun AppRoot(vm: AppViewModel = viewModel(), appStore: AppStore) {
             RosterScreen(
                 bots = bots,
                 groups = groups,
+                summaries = rosterSummaries,
                 onOpen = vm::openChat,
                 onOpenGroup = vm::openGroup,
                 onNewGroup = { creatingGroup = true },

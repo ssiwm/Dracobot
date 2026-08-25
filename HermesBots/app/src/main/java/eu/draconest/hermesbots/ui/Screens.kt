@@ -13,8 +13,10 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
@@ -59,6 +61,7 @@ import eu.draconest.hermesbots.data.ChatMessage
 fun RosterScreen(
     bots: List<BotInfo>,
     groups: List<String>,
+    summaries: Map<String, eu.draconest.hermesbots.data.RosterSummary> = emptyMap(),
     onOpen: (BotInfo) -> Unit,
     onOpenGroup: (String) -> Unit,
     onNewGroup: () -> Unit,
@@ -192,10 +195,15 @@ fun RosterScreen(
                         modifier = Modifier.padding(start = 20.dp, top = 8.dp, bottom = 4.dp))
                 }
                 items(bots, key = { it.name }) { bot ->
+                    val summary = summaries[bot.name]
+                    // "Aktywne teraz" = aktywnosc < 15 min
+                    val nowSec = System.currentTimeMillis() / 1000
+                    val isActive = summary != null && (nowSec - summary.newestActiveAt) < 900
                     Card(
                         shape = RoundedCornerShape(28.dp),
                         colors = CardDefaults.cardColors(
-                            containerColor = MaterialTheme.colorScheme.surfaceVariant
+                            containerColor = if (isActive) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f)
+                            else MaterialTheme.colorScheme.surfaceVariant
                         ),
                         modifier = Modifier
                             .fillMaxWidth()
@@ -211,14 +219,53 @@ fun RosterScreen(
                             verticalAlignment = Alignment.CenterVertically,
                             modifier = Modifier.padding(16.dp)
                         ) {
-                            BotAvatar(bot.name, 44.dp)
+                            Box {
+                                BotAvatar(bot.name, 44.dp)
+                                // badge liczby rozmow
+                                if (summary != null && summary.chatCount > 0) {
+                                    Box(
+                                        contentAlignment = Alignment.Center,
+                                        modifier = Modifier
+                                            .align(Alignment.TopEnd)
+                                            .offset(x = 6.dp, y = (-4).dp)
+                                            .background(MaterialTheme.colorScheme.primary, CircleShape)
+                                            .padding(horizontal = 5.dp, vertical = 1.dp)
+                                    ) {
+                                        Text(
+                                            "${summary.chatCount}",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onPrimary
+                                        )
+                                    }
+                                }
+                            }
                             Spacer(Modifier.size(14.dp))
                             Column(Modifier.weight(1f)) {
-                                Text(bot.name, style = MaterialTheme.typography.titleMedium)
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text(bot.name, style = MaterialTheme.typography.titleMedium)
+                                    if (isActive) {
+                                        Spacer(Modifier.width(6.dp))
+                                        Box(Modifier.size(7.dp).background(MaterialTheme.colorScheme.primary, CircleShape))
+                                    }
+                                }
+                                val subtitle = if (summary != null) {
+                                    val ageMin = ((nowSec - summary.newestActiveAt) / 60).coerceAtLeast(0)
+                                    val when_ = when {
+                                        ageMin < 1 -> "teraz"
+                                        ageMin < 60 -> "$ageMin min temu"
+                                        ageMin < 1440 -> "${ageMin / 60} godz. temu"
+                                        else -> "${ageMin / 1440} dni temu"
+                                    }
+                                    "$when_ · ${summary.newestTitle}"
+                                } else {
+                                    "${bot.model ?: "?"} · ${bot.skillCount} skills"
+                                }
                                 Text(
-                                    "${bot.model ?: "?"} · ${bot.skillCount} skills",
+                                    subtitle,
                                     style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
                                 )
                             }
                             if (bot.gatewayRunning) {

@@ -163,6 +163,7 @@ class AppViewModel : ViewModel() {
             subscribeEvents()
             bots.value = client.listProfiles()
             connected.value = true
+            loadRosterSummaries()
             if (saveCredentials && ::store.isInitialized) {
                 store.url = url.trimEnd('/')
                 store.username = username.trim()
@@ -427,8 +428,20 @@ class AppViewModel : ViewModel() {
             try {
                 bots.value = client.listProfiles()
                 refreshGroupsList()
+                loadRosterSummaries()
             } catch (_: Exception) { /* cicho — pull-refresh nie krzyczy */ }
         }
+    }
+
+    /** Podsumowania rozmów per bot (badge liczby + ostatnia aktywność na rosterze). */
+    val rosterSummaries = MutableStateFlow<Map<String, RosterSummary>>(emptyMap())
+
+    private suspend fun loadRosterSummaries() {
+        val map = mutableMapOf<String, RosterSummary>()
+        for (bot in bots.value) {
+            client.rosterSummary(bot.name)?.let { map[bot.name] = it }
+        }
+        rosterSummaries.value = map
     }
 
     // ---- Tworzenie / usuwanie botów (REST /api/profiles) ----
