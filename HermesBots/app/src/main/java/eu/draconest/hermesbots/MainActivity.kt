@@ -200,7 +200,8 @@ private fun AppRoot(vm: AppViewModel = viewModel(), appStore: AppStore) {
             groups = groups,
             onOpen = vm::openChat,
             onOpenGroup = vm::openGroup,
-            onNewGroup = { creatingGroup = true }
+            onNewGroup = { creatingGroup = true },
+            onRefresh = vm::refreshRoster
         )
         activeGroup != null -> GroupChatScreen(
             groupName = activeGroup!!,

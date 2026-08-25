@@ -419,6 +419,17 @@ class AppViewModel : ViewModel() {
         groups.value = GroupChatEngine.roomNames().sorted()
     }
 
+    /** Pull-to-refresh rosteru: odswiez profile (i liste grup). */
+    fun refreshRoster() {
+        if (!connected.value) return
+        viewModelScope.launch {
+            try {
+                bots.value = client.listProfiles()
+                refreshGroupsList()
+            } catch (_: Exception) { /* cicho — pull-refresh nie krzyczy */ }
+        }
+    }
+
     fun deleteGroup(name: String) {
         // lokalnie: usuwamy pokoj (sesje botow zostaja na serwerze — historia trwa)
         GroupChatEngine.removeRoom(name)

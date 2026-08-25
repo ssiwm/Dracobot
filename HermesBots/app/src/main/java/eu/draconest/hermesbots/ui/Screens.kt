@@ -3,6 +3,7 @@ package eu.draconest.hermesbots.ui
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -60,8 +61,17 @@ fun RosterScreen(
     onOpen: (BotInfo) -> Unit,
     onOpenGroup: (String) -> Unit,
     onNewGroup: () -> Unit,
-    onDeleteGroup: (String) -> Unit = {}
+    onDeleteGroup: (String) -> Unit = {},
+    onRefresh: () -> Unit = {}
 ) {
+    val refreshing = remember { androidx.compose.runtime.mutableStateOf(false) }
+    val refreshScope = androidx.compose.runtime.rememberCoroutineScope()
+    androidx.compose.runtime.LaunchedEffect(refreshing.value) {
+        if (refreshing.value) {
+            kotlinx.coroutines.delay(600)
+            refreshing.value = false
+        }
+    }
     Scaffold { pad ->
         Column(Modifier.fillMaxSize().padding(pad)) {
             Row(
@@ -74,7 +84,14 @@ fun RosterScreen(
                     Icon(Icons.Filled.DateRange, "Nowa grupa botów")
                 }
             }
-            LazyColumn(Modifier.fillMaxSize()) {
+            androidx.compose.material3.pulltorefresh.PullToRefreshBox(
+                isRefreshing = refreshing.value,
+                onRefresh = {
+                    refreshing.value = true
+                    onRefresh()
+                }
+            ) {
+                LazyColumn(Modifier.fillMaxSize()) {
                 // --- sekcja grup ---
                 if (groups.isNotEmpty()) {
                     item {
@@ -157,6 +174,7 @@ fun RosterScreen(
                 }
             }
         }
+        }
     }
 }
 
@@ -173,6 +191,15 @@ fun ChatScreen(
     onRoutines: () -> Unit = {}
 ) {
     var input by remember { mutableStateOf("") }
+    val clipboard = androidx.compose.ui.platform.LocalClipboardManager.current
+    val haptic = androidx.compose.ui.platform.LocalHapticFeedback.current
+    val keyboard = androidx.compose.ui.platform.LocalSoftwareKeyboardController.current
+
+    // auto-scroll do najnowszej wiadomosci
+    val listState = androidx.compose.foundation.lazy.rememberLazyListState()
+    androidx.compose.runtime.LaunchedEffect(messages.size, thinking) {
+        if (messages.isNotEmpty()) listState.animateScrollToItem(0)
+    }
 
     Scaffold(
         topBar = {
@@ -217,7 +244,10 @@ fun ChatScreen(
                     IconButton(
                         onClick = {
                             if (input.isNotBlank()) {
-                                onSend(input.trim()); input = ""
+                                onSend(input.trim())
+                                input = ""
+                                keyboard?.hide()
+                                haptic.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.TextHandleMove)
                             }
                         },
                         enabled = input.isNotBlank()
@@ -245,13 +275,20 @@ fun ChatScreen(
                 )
             }
             LazyColumn(
+                state = listState,
                 reverseLayout = true,
                 modifier = Modifier.fillMaxSize(),
                 contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 items(messages.asReversed(), key = { it.id }) { msg ->
-                    Bubble(msg)
+                    Bubble(
+                        msg,
+                        onLongPress = {
+                            clipboard.setText(androidx.compose.ui.text.AnnotatedString(msg.text))
+                            haptic.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.LongPress)
+                        }
+                    )
                 }
             }
         }
@@ -259,7 +296,7 @@ fun ChatScreen(
 }
 
 @Composable
-private fun Bubble(msg: ChatMessage) {
+private fun Bubble(msg: ChatMessage, onLongPress: () -> Unit = {}) {
     val bg = animateColorAsState(
         if (msg.fromUser) MaterialTheme.colorScheme.primaryContainer
         else MaterialTheme.colorScheme.surfaceVariant,
@@ -272,6 +309,7 @@ private fun Bubble(msg: ChatMessage) {
         Box(
             Modifier
                 .fillMaxWidth(0.85f)
+                .combinedClickableCompat(onLongPress)
                 .background(bg.value, RoundedCornerShape(24.dp))
                 .padding(14.dp)
         ) {
@@ -279,3 +317,8 @@ private fun Bubble(msg: ChatMessage) {
         }
     }
 }
+
+/** combinedClickable wymaga ExperimentalFoundationApi — opakowanie. */
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
+private fun Modifier.combinedClickableCompat(onLongPress: () -> Unit): Modifier =
+    this.combinedClickable(onClick = {}, onLongClick = onLongPress)
