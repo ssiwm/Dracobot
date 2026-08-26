@@ -59,6 +59,23 @@ data class RoutineInfo(
 enum class LinkState { UP, DOWN }
 
 /**
+ * Serialize the only model-switch command shape accepted by the Hermes gateway.
+ * Kept pure so the Android client and its regression test share one contract.
+ */
+internal fun buildSessionModelSwitchCommand(provider: String, model: String): String {
+    val cleanProvider = provider.trim()
+    val cleanModel = model.trim()
+    require(cleanProvider.isNotEmpty()) { "Provider is required" }
+    require(cleanModel.isNotEmpty()) { "Model is required" }
+    return "$cleanModel --provider $cleanProvider --session"
+}
+
+/** Convert an RPC exception into text safe to display rather than throw from UI. */
+internal fun modelSwitchErrorForUi(error: Throwable): String =
+    (error.message ?: "Nie udało się zmienić modelu")
+        .removePrefix("RPC config.set: ")
+
+/**
  * Klient Hermes dashboard WS JSON-RPC — port z działającego PoC (poc_gateway.py):
  * auth: token ze SPA HTML (__HERMES_SESSION_TOKEN__), WS /api/ws?token=...
  * metody: profiles.list / session.create{profile} / prompt.submit{session_id,text}
@@ -281,9 +298,11 @@ class GatewayClient(private val ok: OkHttpClient = OkHttpClient()) {
     val currentModel = kotlinx.coroutines.flow.MutableStateFlow("")
     val currentProvider = kotlinx.coroutines.flow.MutableStateFlow("")
 
-    /** Dostepni providerzy i modele (model.options). */
-    suspend fun modelOptions(): List<Pair<String, List<String>>> {
-        val res = rpc("model.options", JSONObject())
+    /** Dostępni providerzy i modele dla wskazanej sesji (model.options). */
+    suspend fun modelOptions(sessionId: String? = null): List<Pair<String, List<String>>> {
+        val params = JSONObject()
+        if (!sessionId.isNullOrBlank()) params.put("session_id", sessionId)
+        val res = rpc("model.options", params)
         val providers = mutableListOf<Pair<String, List<String>>>()
         val arr = res.optJSONArray("providers") ?: return providers
         for (i in 0 until arr.length()) {
@@ -296,15 +315,21 @@ class GatewayClient(private val ok: OkHttpClient = OkHttpClient()) {
         return providers
     }
 
-    /** Zmiana modelu biezacej sesji (config.set key=model; przy dzialajacej turze — pending na nastepna). */
-    suspend fun setSessionModel(sessionId: String, value: String): String? {
+    /**
+     * Zmienia model wyłącznie w bieżącej sesji. Błędy config.set są wynikiem
+     * dla UI (Toast), a nie nieobsłużonym wyjątkiem coroutine na wątku głównym.
+     */
+    suspend fun setSessionModel(sessionId: String, provider: String, model: String): String? = try {
+        val command = buildSessionModelSwitchCommand(provider, model)
         val res = rpc("config.set", JSONObject()
             .put("session_id", sessionId)
             .put("key", "model")
-            .put("value", value))
-        if (res.has("error")) return res.optString("message").ifBlank { "Błąd zmiany modelu" }
-        currentModel.value = res.optString("value", value)
-        return null // null = OK
+            .put("value", command))
+        currentModel.value = res.optString("value").ifBlank { model.trim() }
+        currentProvider.value = provider.trim()
+        null
+    } catch (e: Exception) {
+        modelSwitchErrorForUi(e)
     }
 
     fun submitPrompt(sessionId: String, text: String): Boolean {

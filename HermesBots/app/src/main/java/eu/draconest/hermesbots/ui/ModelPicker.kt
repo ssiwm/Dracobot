@@ -25,13 +25,14 @@ import androidx.compose.ui.unit.dp
 
 /**
  * Picker modelu AI: providerzy + ich modele z model.options.
- * Klik na model -> onPick("provider/model").
+ * Provider i ID modelu są przekazywane osobno; model pod aggregatorem może
+ * zawierać własny '/' (np. openai/gpt-…), więc nie tworzymy provider/model.
  */
 @Composable
 fun ModelPickerContent(
     currentModel: String,
     currentProvider: String,
-    onPick: (String) -> Unit,
+    onPick: (provider: String, model: String) -> Unit,
     loadOptions: suspend () -> List<Pair<String, List<String>>>
 ) {
     var options by remember { mutableStateOf<List<Pair<String, List<String>>>?>(null) }
@@ -84,13 +85,12 @@ fun ModelPickerContent(
                     }
                     items(models.size, key = { i -> "$providerSlug-$i" }) { idx ->
                         val model = models[idx]
-                        val full = if (model.contains('/')) model else "$providerSlug/$model"
-                        val isCurrent = model == currentModel || full == currentModel
+                        val isCurrent = model == currentModel
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .clickable { onPick(full) }
+                                .clickable { onPick(providerSlug, model) }
                                 .padding(horizontal = 20.dp, vertical = 10.dp)
                         ) {
                             Text(

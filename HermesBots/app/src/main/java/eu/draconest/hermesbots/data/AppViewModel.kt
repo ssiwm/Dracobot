@@ -49,14 +49,17 @@ class AppViewModel : ViewModel() {
     val currentModel get() = client.currentModel
     val currentProvider get() = client.currentProvider
 
-    /** Zmien model biezacej rozmowy; zwraca komunikat bledu lub null. */
-    suspend fun switchModel(value: String): String? {
+    /** Zmienia model bieżącej rozmowy w zakresie tej sesji. */
+    suspend fun switchModel(provider: String, model: String): String? {
         val sid = sessionId ?: return "Brak aktywnej rozmowy"
-        return client.setSessionModel(sid, value)
+        return client.setSessionModel(sid, provider, model)
     }
 
-    /** Lista provider/modeli dla pickera. */
-    suspend fun loadModelOptions(): List<Pair<String, List<String>>> = client.modelOptions()
+    /** Lista provider/modeli dla aktywnej sesji. */
+    suspend fun loadModelOptions(): List<Pair<String, List<String>>> {
+        val sid = sessionId ?: return emptyList()
+        return client.modelOptions(sid)
+    }
 
     // ---- Załączniki ----
 

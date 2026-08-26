@@ -31,10 +31,6 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.automirrored.filled.Send
-import androidx.compose.material.icons.filled.DateRange
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -189,12 +185,29 @@ fun RosterScreen(
                     }
                 } else {
                     item {
-                        Text(
-                            "Grupy: utwórz ikoną 📅 powyżej",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
                             modifier = Modifier.padding(start = 20.dp, bottom = 4.dp)
-                        )
+                        ) {
+                            Text(
+                                "Grupy: utwórz ikoną",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Spacer(Modifier.width(5.dp))
+                            Icon(
+                                painterResource(R.drawable.lucide_ic_users_round),
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(15.dp)
+                            )
+                            Spacer(Modifier.width(5.dp))
+                            Text(
+                                "powyżej",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
                     }
                 }
                 // --- sekcja boty ---
@@ -310,7 +323,7 @@ fun ChatScreen(
     onRoutines: () -> Unit = {},
     currentModel: String = "",
     currentProvider: String = "",
-    onSwitchModel: suspend (String) -> String? = { null },
+    onSwitchModel: suspend (provider: String, model: String) -> String? = { _, _ -> null },
     modelOptionsLoader: suspend () -> List<Pair<String, List<String>>> = { emptyList() },
     attachError: String? = null,
     onClearAttachError: () -> Unit = {},
@@ -366,10 +379,10 @@ fun ChatScreen(
             ModelPickerContent(
                 currentModel = currentModel,
                 currentProvider = currentProvider,
-                onPick = { picked ->
+                onPick = { provider, model ->
                     showModelPicker = false
                     scope.launch {
-                        onSwitchModel(picked)?.let { err ->
+                        onSwitchModel(provider, model)?.let { err ->
                             android.widget.Toast.makeText(context, "⚠️ $err", android.widget.Toast.LENGTH_LONG).show()
                         }
                     }

@@ -20,8 +20,8 @@ android {
         applicationId = "eu.draconest.hermesbots"
         minSdk = 26
         targetSdk = 34
-        versionCode = 28
-        versionName = "1.8.3"
+        versionCode = 29
+        versionName = "1.8.4"
     }
 
     signingConfigs {
@@ -88,4 +88,6 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
     implementation("androidx.security:security-crypto:1.1.0-alpha06")
     implementation("com.google.firebase:firebase-messaging-ktx:24.0.2")
+
+    testImplementation("junit:junit:4.13.2")
 }
