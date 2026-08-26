@@ -42,6 +42,19 @@ class AppViewModel : ViewModel() {
     private var thinkingHistory = MutableStateFlow("")
 
     fun toggleThinking() { thinkingOpen.value = !thinkingOpen.value }
+
+    // ---- Model AI sesji ----
+    val currentModel get() = client.currentModel
+    val currentProvider get() = client.currentProvider
+
+    /** Zmien model biezacej rozmowy; zwraca komunikat bledu lub null. */
+    suspend fun switchModel(value: String): String? {
+        val sid = sessionId ?: return "Brak aktywnej rozmowy"
+        return client.setSessionModel(sid, value)
+    }
+
+    /** Lista provider/modeli dla pickera. */
+    suspend fun loadModelOptions(): List<Pair<String, List<String>>> = client.modelOptions()
     val sessions = MutableStateFlow<List<SessionInfo>>(emptyList())
     /** "offline" = zalogowani, ale WS padl (apka w tle itp.) */
     val offline = MutableStateFlow(false)

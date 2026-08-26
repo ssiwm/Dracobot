@@ -270,7 +270,41 @@ class GatewayClient(private val ok: OkHttpClient = OkHttpClient()) {
                 if (text.isNotBlank()) out.add((role == "user") to text)
             }
         }
+        // model/provider sesji z info (do wyswietlenia i przelaczania w UI)
+        val info = res.optJSONObject("info")
+        currentModel.value = info?.optString("model").orEmpty()
+        currentProvider.value = info?.optString("provider").orEmpty()
         return sid to out
+    }
+
+    /** Aktualny model/provider aktywnej sesji (uzupełniane przy resume). */
+    val currentModel = kotlinx.coroutines.flow.MutableStateFlow("")
+    val currentProvider = kotlinx.coroutines.flow.MutableStateFlow("")
+
+    /** Dostepni providerzy i modele (model.options). */
+    suspend fun modelOptions(): List<Pair<String, List<String>>> {
+        val res = rpc("model.options", JSONObject())
+        val providers = mutableListOf<Pair<String, List<String>>>()
+        val arr = res.optJSONArray("providers") ?: return providers
+        for (i in 0 until arr.length()) {
+            val p = arr.optJSONObject(i) ?: continue
+            val models = mutableListOf<String>()
+            val ma = p.optJSONArray("models")
+            if (ma != null) for (j in 0 until ma.length()) models.add(ma.optString(j))
+            providers.add(p.optString("slug") to models)
+        }
+        return providers
+    }
+
+    /** Zmiana modelu biezacej sesji (config.set key=model; przy dzialajacej turze — pending na nastepna). */
+    suspend fun setSessionModel(sessionId: String, value: String): String? {
+        val res = rpc("config.set", JSONObject()
+            .put("session_id", sessionId)
+            .put("key", "model")
+            .put("value", value))
+        if (res.has("error")) return res.optString("message").ifBlank { "Błąd zmiany modelu" }
+        currentModel.value = res.optString("value", value)
+        return null // null = OK
     }
 
     fun submitPrompt(sessionId: String, text: String): Boolean {

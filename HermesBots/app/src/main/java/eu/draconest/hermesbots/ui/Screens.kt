@@ -1,6 +1,7 @@
 package eu.draconest.hermesbots.ui
 
 import androidx.compose.animation.animateColorAsState
+import kotlinx.coroutines.launch
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
@@ -303,12 +304,37 @@ fun ChatScreen(
     offline: Boolean = false,
     onSend: (String) -> Unit,
     onBack: () -> Unit,
-    onRoutines: () -> Unit = {}
+    onRoutines: () -> Unit = {},
+    currentModel: String = "",
+    currentProvider: String = "",
+    onSwitchModel: suspend (String) -> String? = { null },
+    modelOptionsLoader: suspend () -> List<Pair<String, List<String>>> = { emptyList() }
 ) {
     var input by remember { mutableStateOf("") }
     val clipboard = androidx.compose.ui.platform.LocalClipboardManager.current
     val haptic = androidx.compose.ui.platform.LocalHapticFeedback.current
     val keyboard = androidx.compose.ui.platform.LocalSoftwareKeyboardController.current
+    val context = androidx.compose.ui.platform.LocalContext.current
+    var showModelPicker by remember { mutableStateOf(false) }
+    val scope = androidx.compose.runtime.rememberCoroutineScope()
+
+    if (showModelPicker) {
+        androidx.compose.material3.ModalBottomSheet(onDismissRequest = { showModelPicker = false }) {
+            ModelPickerContent(
+                currentModel = currentModel,
+                currentProvider = currentProvider,
+                onPick = { picked ->
+                    showModelPicker = false
+                    scope.launch {
+                        onSwitchModel(picked)?.let { err ->
+                            android.widget.Toast.makeText(context, "⚠️ $err", android.widget.Toast.LENGTH_LONG).show()
+                        }
+                    }
+                },
+                loadOptions = { modelOptionsLoader() }
+            )
+        }
+    }
 
     // auto-scroll do najnowszej wiadomosci
     val listState = androidx.compose.foundation.lazy.rememberLazyListState()
@@ -325,10 +351,12 @@ fun ChatScreen(
                         Spacer(Modifier.size(10.dp))
                         Column {
                             Text(bot.name, style = MaterialTheme.typography.titleMedium)
-                            if (thinking) Text(
-                                "myśli…",
+                            // klikalny model — otwiera picker
+                            Text(
+                                (currentModel.ifBlank { "model" }) + " ▾",
                                 style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                color = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.combinedClickableCompat(onClick = { showModelPicker = true })
                             )
                         }
                     }
