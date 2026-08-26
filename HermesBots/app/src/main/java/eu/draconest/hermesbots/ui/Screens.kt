@@ -442,14 +442,15 @@ fun ChatScreen(
                     maxLines = 5,
                     leadingIcon = {
                         Row {
-                            // 🎨 generuj obraz
+                            // generuj obraz (Lucide image)
                             IconButton(onClick = { showImageDialog = true }) {
-                                Text("🎨", style = MaterialTheme.typography.titleMedium)
+                                Icon(painterResource(R.drawable.lucide_ic_image), contentDescription = "Generuj obraz",
+                                    tint = MaterialTheme.colorScheme.primary)
                             }
-                            // ＋ załącz plik
+                            // załącz plik (Lucide paperclip)
                             IconButton(onClick = { pickFileLauncher?.invoke() }) {
-                                Text("＋", style = MaterialTheme.typography.titleLarge,
-                                    color = MaterialTheme.colorScheme.primary)
+                                Icon(painterResource(R.drawable.lucide_ic_paperclip), contentDescription = "Załącz plik",
+                                    tint = MaterialTheme.colorScheme.primary)
                             }
                         }
                     },
@@ -582,26 +583,36 @@ private fun Bubble(
                     modifier = Modifier.align(Alignment.TopEnd).offset(y = (-8).dp)
                 ) {
                     Column(Modifier.padding(vertical = 4.dp)) {
-                        Text(
-                            "🔄  Regeneruj",
-                            style = MaterialTheme.typography.bodyMedium,
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
                             modifier = Modifier
                                 .combinedClickableCompat(onClick = {
                                     showMenu = false
                                     onRegenerate()
                                 })
                                 .padding(horizontal = 16.dp, vertical = 10.dp)
-                        )
-                        Text(
-                            "📋  Kopiuj",
-                            style = MaterialTheme.typography.bodyMedium,
+                        ) {
+                            Icon(painterResource(R.drawable.lucide_ic_refresh_cw), contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onSurface,
+                                modifier = Modifier.width(16.dp))
+                            Spacer(Modifier.width(10.dp))
+                            Text("Regeneruj", style = MaterialTheme.typography.bodyMedium)
+                        }
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
                             modifier = Modifier
                                 .combinedClickableCompat(onClick = {
                                     showMenu = false
                                     onLongPress()
                                 })
                                 .padding(horizontal = 16.dp, vertical = 10.dp)
-                        )
+                        ) {
+                            Icon(painterResource(R.drawable.lucide_ic_copy), contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onSurface,
+                                modifier = Modifier.width(16.dp))
+                            Spacer(Modifier.width(10.dp))
+                            Text("Kopiuj", style = MaterialTheme.typography.bodyMedium)
+                        }
                     }
                 }
             }
