@@ -144,6 +144,31 @@ class AppViewModel : ViewModel() {
             generatingImage.value = false
         }
     }
+    /** Czy regeneracja jest mozliwa: jest poprzednia wiadomosc usera i bot nie mysli. */
+    fun canRegenerate(): Boolean =
+       !thinking.value && messages.value.any { it.fromUser } &&
+           messages.value.lastOrNull()?.fromUser == false
+
+    /**
+    * Regeneruj ostatnia odpowiedz bota: ponawia ostatni prompt usera
+    * (serwer doklada nowa odpowiedz do historii).
+    */
+    fun regenerateLast() {
+       if (!canRegenerate()) return
+       val lastUser = messages.value.lastOrNull { it.fromUser }?.text ?: return
+       // nowa tura: czysc podglad myslenia (jak w send)
+       thinkingText.value = ""
+       statusText.value = ""
+       thinkingHasContent.value = false
+       thinkingOpen.value = true
+       val sid = sessionId ?: return
+       val sent = client.submitPrompt(sid, "Powtórz poprzednie zadanie, odpowiedz inaczej/lepiej. Zadanie: $lastUser")
+       if (sent) {
+           thinking.value = true
+           messages.value += ChatMessage(ChatMessage.nextId(), fromUser = true, text = lastUser)
+       }
+    }
+
     val sessions = MutableStateFlow<List<SessionInfo>>(emptyList())
     /** "offline" = zalogowani, ale WS padl (apka w tle itp.) */
     val offline = MutableStateFlow(false)

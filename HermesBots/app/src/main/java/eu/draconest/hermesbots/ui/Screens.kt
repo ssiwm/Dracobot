@@ -313,7 +313,9 @@ fun ChatScreen(
     onClearAttachError: () -> Unit = {},
     pickFileLauncher: (() -> Unit)? = null,
     generatingImage: Boolean = false,
-    onGenerateImage: suspend (String) -> String? = { null }
+    onGenerateImage: suspend (String) -> String? = { null },
+    onRegenerate: () -> Unit = {},
+    regenerateEnabled: Boolean = true
 ) {
     var input by remember { mutableStateOf("") }
     val clipboard = androidx.compose.ui.platform.LocalClipboardManager.current
@@ -490,6 +492,19 @@ fun ChatScreen(
                 contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
+                // pusty czat -> sugestie promptow jak w Groku
+                if (messages.isEmpty() && !thinking) {
+                    item(key = "suggestions") {
+                        SuggestionChips(
+                            botName = bot.name,
+                            onPick = { suggestion ->
+                                onSend(suggestion)
+                                keyboard?.hide()
+                                haptic.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.TextHandleMove)
+                            }
+                        )
+                    }
+                }
                 // panel "myslenia": status procesu + akumulowany reasoning (zwijany)
                 if (thinking && (thinkingText.isNotBlank() || statusText.isNotBlank())) {
                     item(key = "thinking-panel") {
@@ -507,7 +522,10 @@ fun ChatScreen(
                         onLongPress = {
                             clipboard.setText(androidx.compose.ui.text.AnnotatedString(msg.text))
                             haptic.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.LongPress)
-                        }
+                        },
+                        onRegenerate = if (!msg.fromUser && !msg.streaming && regenerateEnabled) {
+                            { onRegenerate() }
+                        } else null
                     )
                 }
             }
@@ -516,7 +534,12 @@ fun ChatScreen(
 }
 
 @Composable
-private fun Bubble(msg: ChatMessage, onLongPress: () -> Unit = {}) {
+private fun Bubble(
+    msg: ChatMessage,
+    onLongPress: () -> Unit = {},
+    onRegenerate: (() -> Unit)? = null
+) {
+    var showMenu by remember { mutableStateOf(false) }
     val bg = animateColorAsState(
         if (msg.fromUser) MaterialTheme.colorScheme.primaryContainer
         else MaterialTheme.colorScheme.surfaceVariant,
@@ -526,24 +549,97 @@ private fun Bubble(msg: ChatMessage, onLongPress: () -> Unit = {}) {
         Modifier.fillMaxWidth(),
         horizontalArrangement = if (msg.fromUser) Arrangement.End else Arrangement.Start
     ) {
-        Box(
-            Modifier
-                .fillMaxWidth(0.85f)
-                .combinedClickableCompat(onLongPress)
-                .background(bg.value, RoundedCornerShape(24.dp))
-                .padding(14.dp)
-        ) {
-            // Markdown poziom blokowy: kod, tabele, naglowki, listy, cytaty.
-            val shown = (msg.text + if (msg.streaming) "▍" else "")
-            MarkdownContent(shown, textColor = MaterialTheme.colorScheme.onSurface)
-            // wygenerowany obraz pod tekstem
-            msg.imageData?.let { dataUrl ->
-                Spacer(Modifier.height(8.dp))
-                DataUrlImage(dataUrl = dataUrl,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(220.dp),
-                    contentDesc = "Wygenerowany obraz")
+        Box {
+            Column(Modifier.fillMaxWidth(0.85f)) {
+                Box(
+                    Modifier
+                        .combinedClickableCompat(onClick = { if (onRegenerate != null) showMenu = !showMenu },
+                            onLongClick = onLongPress)
+                        .background(bg.value, RoundedCornerShape(24.dp))
+                        .padding(14.dp)
+                ) {
+                    // Markdown poziom blokowy: kod, tabele, naglowki, listy, cytaty.
+                    val shown = (msg.text + if (msg.streaming) "▍" else "")
+                    MarkdownContent(shown, textColor = MaterialTheme.colorScheme.onSurface)
+                    // wygenerowany obraz pod tekstem
+                    msg.imageData?.let { dataUrl ->
+                        Spacer(Modifier.height(8.dp))
+                        DataUrlImage(dataUrl = dataUrl,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(220.dp),
+                            contentDesc = "Wygenerowany obraz")
+                    }
+                }
+            }
+            // mini-menu akcji nad odpowiedzia bota (tap)
+            if (showMenu && onRegenerate != null) {
+                androidx.compose.material3.Card(
+                    shape = RoundedCornerShape(14.dp),
+                    modifier = Modifier.align(Alignment.TopEnd).offset(y = (-8).dp)
+                ) {
+                    Column(Modifier.padding(vertical = 4.dp)) {
+                        Text(
+                            "🔄  Regeneruj",
+                            style = MaterialTheme.typography.bodyMedium,
+                            modifier = Modifier
+                                .combinedClickableCompat(onClick = {
+                                    showMenu = false
+                                    onRegenerate()
+                                })
+                                .padding(horizontal = 16.dp, vertical = 10.dp)
+                        )
+                        Text(
+                            "📋  Kopiuj",
+                            style = MaterialTheme.typography.bodyMedium,
+                            modifier = Modifier
+                                .combinedClickableCompat(onClick = {
+                                    showMenu = false
+                                    onLongPress()
+                                })
+                                .padding(horizontal = 16.dp, vertical = 10.dp)
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** Sugestie promptow na pustym czacie (chipsy jak w Groku). */
+@Composable
+fun SuggestionChips(botName: String, onPick: (String) -> Unit) {
+    val suggestions = remember(botName) {
+        listOf(
+            "Wyjaśnij mi prostymi słowami…" to "Wyjaśnij mi prostymi słowami, czym zajmuje się projekt Draco Nest.",
+            "Zaprojektuj…" to "Zaprojektuj plan tygodnia na najbliższe 7 dni z 3 priorytetami dziennie.",
+            "Napisz kod…" to "Napisz w Kotlinie funkcję debounce z korutynami i wyjaśnij ją.",
+            "Podsumuj…" to "Streść kluczowe punkty ostatniej rozmowy w 5 punktach."
+        )
+    }
+    Column(Modifier.fillMaxWidth().padding(horizontal = 4.dp)) {
+        Text(
+            "Zacznij od czegoś:",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(bottom = 8.dp)
+        )
+        suggestions.forEach { (label, prompt) ->
+            androidx.compose.material3.Card(
+                shape = RoundedCornerShape(18.dp),
+                colors = androidx.compose.material3.CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)
+                ),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 4.dp)
+                    .combinedClickableCompat(onClick = { onPick(prompt) })
+            ) {
+                Text(
+                    label,
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp)
+                )
             }
         }
     }

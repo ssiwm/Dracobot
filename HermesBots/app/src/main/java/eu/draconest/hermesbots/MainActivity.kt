@@ -277,7 +277,9 @@ private fun AppRoot(vm: AppViewModel = viewModel(), appStore: AppStore) {
             onClearAttachError = vm::clearAttachError,
             pickFileLauncher = { pickFileLauncher.launch(arrayOf("*/*")) },
             generatingImage = generatingImage,
-            onGenerateImage = { vm.generateImage(it) }
+            onGenerateImage = { vm.generateImage(it) },
+            onRegenerate = { vm.regenerateLast() },
+            regenerateEnabled = !thinking
         )
     }
 }
