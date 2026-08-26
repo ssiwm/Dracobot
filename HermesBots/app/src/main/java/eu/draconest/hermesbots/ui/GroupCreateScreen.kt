@@ -1,5 +1,7 @@
 package eu.draconest.hermesbots.ui
 
+import androidx.compose.ui.res.painterResource
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -37,6 +39,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import eu.draconest.hermesbots.data.BotInfo
+import com.composables.icons.lucide.R
 
 /** Ekran tworzenia grupy botow: nazwa + wybor 2-6 czlonkow. */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -56,7 +59,7 @@ fun GroupCreateScreen(
                 title = { Text("Nowa grupa", style = MaterialTheme.typography.titleMedium) },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, "Wróć")
+                        Icon(painterResource(R.drawable.lucide_ic_arrow_left), contentDescription = "Wróć")
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(

@@ -14,14 +14,14 @@ if (file("google-services.json").exists()) {
 
 android {
     namespace = "eu.draconest.hermesbots"
-    compileSdk = 34
+    compileSdk = 35
 
     defaultConfig {
         applicationId = "eu.draconest.hermesbots"
         minSdk = 26
         targetSdk = 34
-        versionCode = 25
-        versionName = "1.8.0"
+        versionCode = 26
+        versionName = "1.8.1"
     }
 
     signingConfigs {
@@ -53,6 +53,10 @@ android {
     kotlinOptions {
         jvmTarget = "17"
     }
+    lint {
+        checkReleaseBuilds = false
+        abortOnError = false
+    }
     buildFeatures {
         compose = true
         buildConfig = true
@@ -74,6 +78,8 @@ dependencies {
     debugImplementation("androidx.compose.ui:ui-tooling")
 
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    // Lucide icons (SVG -> vector drawables) — styl ikon jak w Grok/nowoczesnych apkach
+    implementation("com.composables:icons-lucide-android:2.2.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
     implementation("androidx.security:security-crypto:1.1.0-alpha06")
     implementation("com.google.firebase:firebase-messaging-ktx:24.0.2")

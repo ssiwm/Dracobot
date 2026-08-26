@@ -1,5 +1,7 @@
 package eu.draconest.hermesbots.ui
 
+import androidx.compose.ui.res.painterResource
+import androidx.compose.foundation.Image
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -37,6 +39,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import eu.draconest.hermesbots.data.BotInfo
+import com.composables.icons.lucide.R
 import eu.draconest.hermesbots.data.GroupChatEngine
 
 /** Czat grupowy: pokoj z logiem, kazdy bot ma swoj avatar i kolor. */
@@ -80,7 +83,7 @@ fun GroupChatScreen(
                 },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, "Wróć")
+                        Icon(painterResource(R.drawable.lucide_ic_arrow_left), contentDescription = "Wróć")
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
@@ -100,7 +103,7 @@ fun GroupChatScreen(
                         onClick = { if (input.isNotBlank()) { onSend(input.trim()); input = "" } },
                         enabled = input.isNotBlank()
                     ) {
-                        Icon(Icons.AutoMirrored.Filled.Send, "Wyślij")
+                        Icon(painterResource(R.drawable.lucide_ic_send), contentDescription = "Wyślij")
                     }
                 },
                 modifier = Modifier.fillMaxWidth().imePadding()

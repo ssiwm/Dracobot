@@ -1,5 +1,7 @@
 package eu.draconest.hermesbots.ui
 
+import androidx.compose.ui.res.painterResource
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -30,6 +32,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import eu.draconest.hermesbots.data.BotInfo
+import com.composables.icons.lucide.R
 import eu.draconest.hermesbots.data.RoutineInfo
 
 private fun scheduleLabel(schedule: String): String {
@@ -72,7 +75,7 @@ fun RoutinesScreen(
                 },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, "Wróć")
+                        Icon(painterResource(R.drawable.lucide_ic_arrow_left), contentDescription = "Wróć")
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(

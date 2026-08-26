@@ -1,5 +1,7 @@
 package eu.draconest.hermesbots.ui
 
+import androidx.compose.ui.res.painterResource
+import androidx.compose.foundation.Image
 import androidx.compose.animation.animateColorAsState
 import kotlinx.coroutines.launch
 import androidx.compose.animation.core.animateFloat
@@ -57,6 +59,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import eu.draconest.hermesbots.data.BotInfo
+import com.composables.icons.lucide.R
 import eu.draconest.hermesbots.data.ChatMessage
 
 /** Determinystyczny „blob avatar" z nazwy bota — patrz BotAvatar.kt (1:1 z desktopu). */
@@ -144,7 +147,7 @@ fun RosterScreen(
                 Text("Boty", style = MaterialTheme.typography.headlineLarge,
                     modifier = Modifier.weight(1f))
                 IconButton(onClick = onNewGroup) {
-                    Icon(Icons.Filled.DateRange, "Nowa grupa botów")
+                    Icon(painterResource(R.drawable.lucide_ic_users_round), contentDescription = "Nowa grupa botów")
                 }
             }
             androidx.compose.material3.pulltorefresh.PullToRefreshBox(
@@ -403,12 +406,12 @@ fun ChatScreen(
                 },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, "Wróć")
+                        Icon(painterResource(R.drawable.lucide_ic_arrow_left), contentDescription = "Wróć")
                     }
                 },
                 actions = {
                     IconButton(onClick = onRoutines) {
-                        Icon(Icons.Filled.DateRange, "Routines")
+                        Icon(painterResource(R.drawable.lucide_ic_calendar), contentDescription = "Routines")
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
@@ -462,7 +465,7 @@ fun ChatScreen(
                         },
                         enabled = input.isNotBlank()
                     ) {
-                        Icon(Icons.AutoMirrored.Filled.Send, "Wyślij")
+                        Icon(painterResource(R.drawable.lucide_ic_send), contentDescription = "Wyślij")
                     }
                 },
                     modifier = Modifier
