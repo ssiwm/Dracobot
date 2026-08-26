@@ -136,6 +136,7 @@ private fun AppRoot(vm: AppViewModel = viewModel(), appStore: AppStore) {
     val currentModel by vm.currentModel.collectAsState()
     val currentProvider by vm.currentProvider.collectAsState()
     val attachError by vm.attachError.collectAsState()
+    val generatingImage by vm.generatingImage.collectAsState()
     val appContext = androidx.compose.ui.platform.LocalContext.current
 
     // systemowy picker plikow (obrazy, PDF, dokumenty)
@@ -274,7 +275,9 @@ private fun AppRoot(vm: AppViewModel = viewModel(), appStore: AppStore) {
             modelOptionsLoader = { vm.loadModelOptions() },
             attachError = attachError,
             onClearAttachError = vm::clearAttachError,
-            pickFileLauncher = { pickFileLauncher.launch(arrayOf("*/*")) }
+            pickFileLauncher = { pickFileLauncher.launch(arrayOf("*/*")) },
+            generatingImage = generatingImage,
+            onGenerateImage = { vm.generateImage(it) }
         )
     }
 }

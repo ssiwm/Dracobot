@@ -13,7 +13,9 @@ data class ChatMessage(
     val id: Long,
     val fromUser: Boolean,
     val text: String,
-    val streaming: Boolean = false
+    val streaming: Boolean = false,
+    /** data URL obrazka (generacje) — renderowany w dymku. */
+    val imageData: String? = null
 ) {
     companion object {
         private val counter = java.util.concurrent.atomic.AtomicLong(1)
@@ -97,6 +99,51 @@ class AppViewModel : ViewModel() {
     }
 
     fun clearAttachError() { _attachError.value = null }
+
+    // ---- Generowanie obrazów ----
+
+    data class GeneratedImage(val dataUrl: String, val prompt: String)
+
+    /** Ostatni wygenerowany obraz (do pokazania w czacie). */
+    val lastGenerated = MutableStateFlow<GeneratedImage?>(null)
+    val generatingImage = MutableStateFlow(false)
+
+    /**
+     * Wygeneruj obraz (image.generate). Zwraca komunikat bledu lub null.
+     * Wynik trafia do lastGenerated i jako wiadomosc w czacie.
+     */
+    suspend fun generateImage(prompt: String, aspect: String = "square"): String? {
+        if (prompt.isBlank()) return "Pusty prompt"
+        generatingImage.value = true
+        try {
+            val res = client.rpcRaw("image.generate", org.json.JSONObject()
+                .put("prompt", prompt.trim())
+                .put("aspect_ratio", aspect))
+            if (!res.optBoolean("available", true)) {
+                return "Generowanie obrazów nie jest skonfigurowane na serwerze. Dodaj FAL_KEY do .env lub ustaw image_gen.provider przez `hermes tools`."
+            }
+            if (!res.optBoolean("success", false)) {
+                return res.optString("error").ifBlank { "Generowanie nie powiodło się" }
+            }
+            val dataUrl = res.optString("image_data").ifBlank { "" }
+            if (dataUrl.isBlank()) {
+                // brak data URL — jest moze URL/path; pokaz info
+                return "Obraz wygenerowany, ale nie udało się go pobrać: ${res.optString("image")}"
+            }
+            val img = GeneratedImage(dataUrl, prompt.trim())
+            lastGenerated.value = img
+            messages.value += ChatMessage(
+                ChatMessage.nextId(), fromUser = false,
+                text = "🎨 Wygenerowano: „${prompt.trim()}”",
+                imageData = dataUrl
+            )
+            return null
+        } catch (e: Exception) {
+            return e.message ?: "Błąd generowania"
+        } finally {
+            generatingImage.value = false
+        }
+    }
     val sessions = MutableStateFlow<List<SessionInfo>>(emptyList())
     /** "offline" = zalogowani, ale WS padl (apka w tle itp.) */
     val offline = MutableStateFlow(false)

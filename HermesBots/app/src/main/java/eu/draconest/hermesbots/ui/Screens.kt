@@ -311,7 +311,9 @@ fun ChatScreen(
     modelOptionsLoader: suspend () -> List<Pair<String, List<String>>> = { emptyList() },
     attachError: String? = null,
     onClearAttachError: () -> Unit = {},
-    pickFileLauncher: (() -> Unit)? = null
+    pickFileLauncher: (() -> Unit)? = null,
+    generatingImage: Boolean = false,
+    onGenerateImage: suspend (String) -> String? = { null }
 ) {
     var input by remember { mutableStateOf("") }
     val clipboard = androidx.compose.ui.platform.LocalClipboardManager.current
@@ -320,6 +322,39 @@ fun ChatScreen(
     val context = androidx.compose.ui.platform.LocalContext.current
     var showModelPicker by remember { mutableStateOf(false) }
     val scope = androidx.compose.runtime.rememberCoroutineScope()
+    var showImageDialog by remember { mutableStateOf(false) }
+    var imagePrompt by remember { mutableStateOf("") }
+
+    if (showImageDialog) {
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { showImageDialog = false },
+            title = { Text("Generuj obraz") },
+            text = {
+                Column {
+                    androidx.compose.material3.OutlinedTextField(
+                        value = imagePrompt,
+                        onValueChange = { imagePrompt = it },
+                        placeholder = { Text("Opis obrazu, np. „kot astronauta w stylu akwareli”") },
+                        minLines = 2,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            },
+            confirmButton = {
+                androidx.compose.material3.Button(
+                    onClick = {
+                        val p = imagePrompt.trim()
+                        showImageDialog = false
+                        if (p.isNotEmpty()) scope.launch { onGenerateImage(p)?.let { } }
+                    },
+                    enabled = imagePrompt.isNotBlank() && !generatingImage
+                ) { Text(if (generatingImage) "Generuję…" else "Generuj") }
+            },
+            dismissButton = {
+                androidx.compose.material3.TextButton(onClick = { showImageDialog = false }) { Text("Anuluj") }
+            }
+        )
+    }
 
     if (showModelPicker) {
         androidx.compose.material3.ModalBottomSheet(onDismissRequest = { showModelPicker = false }) {
@@ -401,9 +436,16 @@ fun ChatScreen(
                     shape = RoundedCornerShape(28.dp),
                     maxLines = 5,
                     leadingIcon = {
-                        IconButton(onClick = { pickFileLauncher?.invoke() }) {
-                            Text("＋", style = MaterialTheme.typography.titleLarge,
-                                color = MaterialTheme.colorScheme.primary)
+                        Row {
+                            // 🎨 generuj obraz
+                            IconButton(onClick = { showImageDialog = true }) {
+                                Text("🎨", style = MaterialTheme.typography.titleMedium)
+                            }
+                            // ＋ załącz plik
+                            IconButton(onClick = { pickFileLauncher?.invoke() }) {
+                                Text("＋", style = MaterialTheme.typography.titleLarge,
+                                    color = MaterialTheme.colorScheme.primary)
+                            }
                         }
                     },
                 trailingIcon = {
@@ -494,6 +536,15 @@ private fun Bubble(msg: ChatMessage, onLongPress: () -> Unit = {}) {
             // Markdown poziom blokowy: kod, tabele, naglowki, listy, cytaty.
             val shown = (msg.text + if (msg.streaming) "▍" else "")
             MarkdownContent(shown, textColor = MaterialTheme.colorScheme.onSurface)
+            // wygenerowany obraz pod tekstem
+            msg.imageData?.let { dataUrl ->
+                Spacer(Modifier.height(8.dp))
+                DataUrlImage(dataUrl = dataUrl,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(220.dp),
+                    contentDesc = "Wygenerowany obraz")
+            }
         }
     }
 }
