@@ -55,6 +55,48 @@ class AppViewModel : ViewModel() {
 
     /** Lista provider/modeli dla pickera. */
     suspend fun loadModelOptions(): List<Pair<String, List<String>>> = client.modelOptions()
+
+    // ---- Załączniki ----
+
+    data class AttachedItem(val name: String, val message: String)
+    val attachments = MutableStateFlow<List<AttachedItem>>(emptyList())
+    private val _attachError = MutableStateFlow<String?>(null)
+    val attachError = _attachError
+
+    /**
+     * Zalacz plik: czyta bytes z ContentResolver, wybiera RPC wg MIME.
+     * Wynik dolacza jako wiadomosc w czacie.
+     */
+    fun attachFromUri(context: android.content.Context, uri: android.net.Uri) {
+        val sid = sessionId
+        if (sid == null) { _attachError.value = "Najpierw otwórz rozmowę"; return }
+        viewModelScope.launch {
+            try {
+                val resolver = context.contentResolver
+                val bytes = resolver.openInputStream(uri)?.use { it.readBytes() }
+                if (bytes == null || bytes.isEmpty()) { _attachError.value = "Plik pusty lub nieczytelny"; return@launch }
+                if (bytes.size > 45 * 1024 * 1024) { _attachError.value = "Plik za duży (limit ~45 MB)"; return@launch }
+                val mime = resolver.getType(uri) ?: "application/octet-stream"
+                val name = uri.lastPathSegment?.substringAfterLast('/') ?: "plik"
+                val result = when {
+                    mime.startsWith("image/") -> client.attachImage(sid, bytes, name)
+                    mime == "application/pdf" -> client.attachPdf(sid, bytes, name)
+                    else -> client.attachFile(sid, bytes, name, mime)
+                }
+                if (result.ok) {
+                    attachments.value = attachments.value + AttachedItem(name, result.message)
+                    messages.value += ChatMessage(ChatMessage.nextId(), fromUser = false, text = "📎 ${result.message}")
+                    _attachError.value = null
+                } else {
+                    _attachError.value = result.message
+                }
+            } catch (e: Exception) {
+                _attachError.value = e.message ?: "Błąd odczytu pliku"
+            }
+        }
+    }
+
+    fun clearAttachError() { _attachError.value = null }
     val sessions = MutableStateFlow<List<SessionInfo>>(emptyList())
     /** "offline" = zalogowani, ale WS padl (apka w tle itp.) */
     val offline = MutableStateFlow(false)

@@ -135,6 +135,15 @@ private fun AppRoot(vm: AppViewModel = viewModel(), appStore: AppStore) {
     val thinkingOpen by vm.thinkingOpen.collectAsState()
     val currentModel by vm.currentModel.collectAsState()
     val currentProvider by vm.currentProvider.collectAsState()
+    val attachError by vm.attachError.collectAsState()
+    val appContext = androidx.compose.ui.platform.LocalContext.current
+
+    // systemowy picker plikow (obrazy, PDF, dokumenty)
+    val pickFileLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) vm.attachFromUri(appContext, uri)
+    }
     var deleteCandidate by remember { mutableStateOf<eu.draconest.hermesbots.data.BotInfo?>(null) }
 
     // podlacz trwaly store + auto-connect + obserwacja linku WS
@@ -262,7 +271,10 @@ private fun AppRoot(vm: AppViewModel = viewModel(), appStore: AppStore) {
             currentModel = currentModel,
             currentProvider = currentProvider,
             onSwitchModel = { vm.switchModel(it) },
-            modelOptionsLoader = { vm.loadModelOptions() }
+            modelOptionsLoader = { vm.loadModelOptions() },
+            attachError = attachError,
+            onClearAttachError = vm::clearAttachError,
+            pickFileLauncher = { pickFileLauncher.launch(arrayOf("*/*")) }
         )
     }
 }

@@ -392,6 +392,70 @@ class GatewayClient(private val ok: OkHttpClient = OkHttpClient()) {
     /** Niskopoziomowe RPC dla GroupChatEngine. */
     suspend fun rpcRaw(method: String, params: JSONObject): JSONObject = rpc(method, params)
 
+    // ---- Załączniki ----
+
+    /** Wynik załączenia pliku (z gatewaya). */
+    data class AttachResult(val ok: Boolean, val message: String)
+
+    /**
+     * Zalacz obrazek do sesji (image.attach_bytes, base64).
+     * Obrazek trafia do kolejki sesji i pójdzie z następnym promptem.
+     */
+    suspend fun attachImage(sessionId: String, bytes: ByteArray, filename: String): AttachResult {
+        return try {
+            val b64 = android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP)
+            val res = rpc("image.attach_bytes", JSONObject()
+                .put("session_id", sessionId)
+                .put("content_base64", b64)
+                .put("filename", filename))
+            if (res.optBoolean("attached")) {
+                AttachResult(true, res.optString("text"))
+            } else {
+                AttachResult(false, res.optString("message").ifBlank { "Nie udało się załączyć" })
+            }
+        } catch (e: Exception) {
+            AttachResult(false, e.message ?: "Błąd załączania")
+        }
+    }
+
+    /**
+     * Zalacz PDF (pdf.attach, base64) — serwer renderuje strony na obrazy wizyjne.
+     */
+    suspend fun attachPdf(sessionId: String, bytes: ByteArray, filename: String): AttachResult {
+        return try {
+            val b64 = android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP)
+            val res = rpc("pdf.attach", JSONObject()
+                .put("session_id", sessionId)
+                .put("content_base64", b64)
+                .put("filename", filename))
+            if (res.optBoolean("attached") || res.has("pages")) {
+                AttachResult(true, res.optString("text").ifBlank { "PDF załączony (${res.optInt("pages")} str.)" })
+            } else {
+                AttachResult(false, res.optString("message").ifBlank { "Nie udało się załączyć PDF" })
+            }
+        } catch (e: Exception) {
+            AttachResult(false, e.message ?: "Błąd załączania PDF")
+        }
+    }
+
+    /**
+     * Zalacz plik inny niż obraz/PDF (file.attach z data_url) — plik trafia
+     * do workspace'u sesji, agent moze go czytac narzedziami.
+     */
+    suspend fun attachFile(sessionId: String, bytes: ByteArray, filename: String, mime: String): AttachResult {
+        return try {
+            val b64 = android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP)
+            val res = rpc("file.attach", JSONObject()
+                .put("session_id", sessionId)
+                .put("name", filename)
+                .put("data_url", "data:$mime;base64,$b64"))
+            if (res.has("error")) AttachResult(false, res.optString("message").ifBlank { "Nie udało się załączyć pliku" })
+            else AttachResult(true, res.optString("text").ifBlank { "Plik $filename załączony" })
+        } catch (e: Exception) {
+            AttachResult(false, e.message ?: "Błąd załączania pliku")
+        }
+    }
+
     /** Utwórz bota przez REST POST /api/profiles (klon z mirror credentials). */
     suspend fun createBot(name: String) {
         val token = fetchToken()

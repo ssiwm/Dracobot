@@ -308,7 +308,10 @@ fun ChatScreen(
     currentModel: String = "",
     currentProvider: String = "",
     onSwitchModel: suspend (String) -> String? = { null },
-    modelOptionsLoader: suspend () -> List<Pair<String, List<String>>> = { emptyList() }
+    modelOptionsLoader: suspend () -> List<Pair<String, List<String>>> = { emptyList() },
+    attachError: String? = null,
+    onClearAttachError: () -> Unit = {},
+    pickFileLauncher: (() -> Unit)? = null
 ) {
     var input by remember { mutableStateOf("") }
     val clipboard = androidx.compose.ui.platform.LocalClipboardManager.current
@@ -377,12 +380,32 @@ fun ChatScreen(
             )
         },
         bottomBar = {
-            OutlinedTextField(
-                value = input,
-                onValueChange = { input = it },
-                placeholder = { Text("Napisz do ${bot.name}…") },
-                shape = RoundedCornerShape(28.dp),
-                maxLines = 5,
+            Column {
+                // pasek bledu zalacznika
+                attachError?.let { err ->
+                    Text(
+                        "⚠️ $err — dotknij, by ukryć",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .combinedClickableCompat(onClick = onClearAttachError)
+                            .background(MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.4f))
+                            .padding(horizontal = 16.dp, vertical = 4.dp)
+                    )
+                }
+                OutlinedTextField(
+                    value = input,
+                    onValueChange = { input = it },
+                    placeholder = { Text("Napisz do ${bot.name}…") },
+                    shape = RoundedCornerShape(28.dp),
+                    maxLines = 5,
+                    leadingIcon = {
+                        IconButton(onClick = { pickFileLauncher?.invoke() }) {
+                            Text("＋", style = MaterialTheme.typography.titleLarge,
+                                color = MaterialTheme.colorScheme.primary)
+                        }
+                    },
                 trailingIcon = {
                     IconButton(
                         onClick = {
@@ -398,11 +421,12 @@ fun ChatScreen(
                         Icon(Icons.AutoMirrored.Filled.Send, "Wyślij")
                     }
                 },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .imePadding()
-                    .padding(horizontal = 12.dp, vertical = 8.dp)
-            )
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .imePadding()
+                        .padding(horizontal = 12.dp, vertical = 8.dp)
+                )
+            }
         }
     ) { pad ->
         Column(Modifier.fillMaxSize().padding(pad)) {
