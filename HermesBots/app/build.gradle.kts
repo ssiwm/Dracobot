@@ -20,7 +20,7 @@ android {
         applicationId = "eu.draconest.hermesbots"
         minSdk = 26
         targetSdk = 34
-        versionCode = 34
+        versionCode = 35
         versionName = "1.8.9"
     }
 

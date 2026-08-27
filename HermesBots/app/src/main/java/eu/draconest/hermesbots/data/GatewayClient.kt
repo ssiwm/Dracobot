@@ -818,8 +818,13 @@ open class GatewayClient(private val ok: OkHttpClient = OkHttpClient()) {
     open suspend fun submitPrompt(sessionId: String, text: String, queued: Boolean = false): Boolean =
         submitPromptResult(sessionId, text, queued) is PromptSubmissionResult.Accepted
 
-    fun close() {
+    /** Invalidate a half-open transport after an authoritative RPC health-check fails. */
+    open fun invalidateTransport() {
         resetConnection()
+    }
+
+    fun close() {
+        invalidateTransport()
     }
 
     /** Routines bota = cron jobs otagowane [bot:<nazwa>] (jak desktop Bot Mode). */

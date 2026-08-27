@@ -918,9 +918,12 @@ class AppViewModel(
         if (linkWatchJob?.isActive == true) return
         linkWatchJob = viewModelScope.launch {
             client.linkState.collect { state ->
-                if (state == LinkState.DOWN && connected.value && !offline.value) {
-                    offline.value = true
-                    quietReconnectLoop()
+                when (state) {
+                    LinkState.UP -> offline.value = false
+                    LinkState.DOWN -> if (connected.value && !offline.value) {
+                        offline.value = true
+                        quietReconnectLoop()
+                    }
                 }
             }
         }
@@ -1140,10 +1143,13 @@ class AppViewModel(
                 false
             }
             if (!healthy) {
-                // wymuszone przełaczenie linku na DOWN -> cichy reconnect
+                // An RPC failure makes an otherwise UP socket half-open; force DOWN before retrying.
+                client.invalidateTransport()
                 offline.value = true
                 quietReconnectLoop()
             } else {
+                // A successful RPC is authoritative proof that the current transport is usable.
+                offline.value = false
                 // gniazdo zyje — ale odpowiedzi mogly wpasc podczas tla: odswiez i odblokuj "mysli"
                 refreshCurrentChatAfterReconnect()
                 flushOutbox()
@@ -1168,6 +1174,7 @@ class AppViewModel(
             subscribeEvents()
             bots.value = client.listProfiles()
             connected.value = true
+            offline.value = false
             loadRosterSummaries()
             if (saveCredentials && ::store.isInitialized) {
                 store.url = url.trimEnd('/')
@@ -1201,6 +1208,7 @@ class AppViewModel(
                     subscribeEvents()
                     bots.value = client.listProfiles()
                     connected.value = true
+                    offline.value = false
                     connectionError.value = null
                     restoreLastBot()
                     break
