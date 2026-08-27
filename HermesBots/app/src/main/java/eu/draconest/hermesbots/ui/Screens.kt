@@ -80,6 +80,7 @@ fun RosterScreen(
     onNewGroup: () -> Unit,
     outboxCount: Int = 0,
     onOpenOutbox: () -> Unit = {},
+    onOpenHealth: () -> Unit = {},
     onDeleteGroup: (String) -> Unit = {},
     onRefresh: () -> Unit = {},
     onCreateBot: (String) -> Unit = {},
@@ -154,6 +155,9 @@ fun RosterScreen(
                     modifier = Modifier.weight(1f))
                 androidx.compose.material3.TextButton(onClick = onOpenOutbox) {
                     Text(if (outboxCount > 0) "Kolejka ($outboxCount)" else "Kolejka")
+                }
+                androidx.compose.material3.TextButton(onClick = onOpenHealth) {
+                    Text("Stan")
                 }
                 IconButton(onClick = onNewGroup) {
                     Icon(painterResource(R.drawable.lucide_ic_users_round), contentDescription = "Nowa grupa botów")

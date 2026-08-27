@@ -214,7 +214,9 @@ internal data class QueuedPrompt(
     val text: String,
     val deliveryState: QueuedPromptDeliveryState = QueuedPromptDeliveryState.Pending,
     /** Human-readable gateway reason for an explicitly rejected delivery; absent for legacy entries. */
-    val deliveryDetail: String? = null
+    val deliveryDetail: String? = null,
+    /** Wall-clock enqueue time for local aggregate diagnostics; 0 means legacy/unknown. */
+    val createdAtEpochMillis: Long = System.currentTimeMillis()
 )
 
 internal fun canFlushSessionOutbox(
@@ -322,7 +324,8 @@ internal class SessionOutbox(initialEntries: List<QueuedPrompt> = emptyList()) {
         return current.copy(
             id = java.util.UUID.randomUUID().toString(),
             deliveryState = QueuedPromptDeliveryState.Pending,
-            deliveryDetail = null
+            deliveryDetail = null,
+            createdAtEpochMillis = System.currentTimeMillis()
         ).also { entries[index] = it }
     }
 
@@ -1568,9 +1571,22 @@ class AppViewModel(
     val viewRoutines = _viewRoutines.asStateFlow()
     private val _viewOutbox = MutableStateFlow(false)
     val viewOutbox = _viewOutbox.asStateFlow()
+    private val _viewHealth = MutableStateFlow(false)
+    val viewHealth = _viewHealth.asStateFlow()
 
-    fun openOutbox() { _viewOutbox.value = true }
+    fun openOutbox() {
+        _viewHealth.value = false
+        _viewOutbox.value = true
+    }
+
     fun closeOutbox() { _viewOutbox.value = false }
+
+    fun openHealth() {
+        _viewOutbox.value = false
+        _viewHealth.value = true
+    }
+
+    fun closeHealth() { _viewHealth.value = false }
 
     fun openRoutines() {
         val bot = activeBot.value ?: return

@@ -43,12 +43,14 @@ import eu.draconest.hermesbots.data.NOTIFICATION_PROFILE_EXTRA
 import eu.draconest.hermesbots.data.NOTIFICATION_STORED_SESSION_EXTRA
 import eu.draconest.hermesbots.data.NotificationTarget
 import eu.draconest.hermesbots.data.chatActionAvailability
+import eu.draconest.hermesbots.data.localHealthSnapshot
 import eu.draconest.hermesbots.data.notificationTargetFromIntentExtras
 import eu.draconest.hermesbots.ui.ChatScreen
 import eu.draconest.hermesbots.ui.ConnectScreen
 import eu.draconest.hermesbots.ui.DeleteBotDialog
 import eu.draconest.hermesbots.ui.GroupChatScreen
 import eu.draconest.hermesbots.ui.GroupCreateScreen
+import eu.draconest.hermesbots.ui.HealthScreen
 import eu.draconest.hermesbots.ui.OutboxScreen
 import eu.draconest.hermesbots.ui.RosterScreen
 import eu.draconest.hermesbots.ui.RoutinesScreen
@@ -164,6 +166,7 @@ private fun AppRoot(
     val routines by vm.routines.collectAsState()
     val viewRoutines by vm.viewRoutines.collectAsState()
     val viewOutbox by vm.viewOutbox.collectAsState()
+    val viewHealth by vm.viewHealth.collectAsState()
     val outboxEntries by vm.outboxEntries.collectAsState()
     val groups by vm.groups.collectAsState()
     val activeGroup by vm.activeGroup.collectAsState()
@@ -238,6 +241,7 @@ private fun AppRoot(
         when {
             creatingGroup -> creatingGroup = false
             viewOutbox -> vm.closeOutbox()
+            viewHealth -> vm.closeHealth()
             activeGroup != null -> vm.closeGroup()
             viewRoutines -> vm.closeRoutines()
             sessions.isNotEmpty() || activeBot != null -> vm.closeChat()
@@ -283,6 +287,16 @@ private fun AppRoot(
             onDiscard = { entry -> vm.discardOutboxEntry(entry.id) },
             onBack = vm::closeOutbox
         )
+        viewHealth -> HealthScreen(
+            snapshot = localHealthSnapshot(
+                connected = connected,
+                connecting = connecting,
+                hasConnectionError = error != null,
+                entries = outboxEntries,
+                nowEpochMillis = System.currentTimeMillis()
+            ),
+            onBack = vm::closeHealth
+        )
         activeBot == null && activeGroup == null -> {
             RosterScreen(
                 bots = bots,
@@ -293,6 +307,7 @@ private fun AppRoot(
                 onNewGroup = { creatingGroup = true },
                 outboxCount = outboxEntries.size,
                 onOpenOutbox = vm::openOutbox,
+                onOpenHealth = vm::openHealth,
                 onRefresh = vm::refreshRoster,
                 onCreateBot = vm::createBot,
                 onDeleteBot = { name -> deleteCandidate = bots.firstOrNull { it.name == name } },

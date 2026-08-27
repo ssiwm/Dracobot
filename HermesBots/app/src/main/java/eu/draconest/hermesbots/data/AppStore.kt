@@ -9,6 +9,14 @@ import org.json.JSONObject
 
 /** JSON representation kept inside encrypted preferences; malformed legacy data is safely ignored. */
 internal object QueuedPromptSnapshotCodec {
+    private fun positiveExactEpochMillis(raw: Any?): Long = when (raw) {
+        is Byte -> raw.toLong()
+        is Short -> raw.toLong()
+        is Int -> raw.toLong()
+        is Long -> raw
+        else -> 0L
+    }.takeIf { it > 0L } ?: 0L
+
     fun encode(entries: List<QueuedPrompt>): String = JSONArray().apply {
         entries.forEach { entry ->
             put(JSONObject()
@@ -17,7 +25,8 @@ internal object QueuedPromptSnapshotCodec {
                 .put("profile_name", entry.profileName)
                 .put("text", entry.text)
                 .put("delivery_state", entry.deliveryState.name)
-                .put("delivery_detail", entry.deliveryDetail))
+                .put("delivery_detail", entry.deliveryDetail)
+                .put("created_at_epoch_ms", entry.createdAtEpochMillis))
         }
     }.toString()
 
@@ -40,7 +49,8 @@ internal object QueuedPromptSnapshotCodec {
                     profileName = profileName,
                     text = entry.optString("text"),
                     deliveryState = deliveryState,
-                    deliveryDetail = deliveryDetail
+                    deliveryDetail = deliveryDetail,
+                    createdAtEpochMillis = positiveExactEpochMillis(entry.opt("created_at_epoch_ms"))
                 ))
             }
         }

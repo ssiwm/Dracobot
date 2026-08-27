@@ -452,7 +452,8 @@ class SessionModelSyncTest {
                 profileName = "bot-a",
                 text = "durable prompt",
                 deliveryState = QueuedPromptDeliveryState.Indeterminate,
-                deliveryDetail = "Gateway acknowledgement timed out"
+                deliveryDetail = "Gateway acknowledgement timed out",
+                createdAtEpochMillis = 1_234L
             )
         )
 
@@ -473,6 +474,24 @@ class SessionModelSyncTest {
 
         assertEquals(QueuedPromptDeliveryState.Indeterminate, unknown.deliveryState)
         assertEquals(QueuedPromptDeliveryState.Indeterminate, missing.deliveryState)
+        assertEquals(0L, missing.createdAtEpochMillis)
+    }
+
+    @Test
+    fun malformedPersistedEnqueueTimestampIsUnknownInsteadOfCoerced() {
+        val fractional = QueuedPromptSnapshotCodec.decode(
+            """[{"id":"fractional","stored_session_id":"stored-a","profile_name":"bot-a","text":"x","delivery_state":"Pending","created_at_epoch_ms":1234.5}]"""
+        ).single()
+        val numericString = QueuedPromptSnapshotCodec.decode(
+            """[{"id":"numeric-string","stored_session_id":"stored-b","profile_name":"bot-a","text":"x","delivery_state":"Pending","created_at_epoch_ms":"1234"}]"""
+        ).single()
+        val nonPositive = QueuedPromptSnapshotCodec.decode(
+            """[{"id":"zero","stored_session_id":"stored-c","profile_name":"bot-a","text":"x","delivery_state":"Pending","created_at_epoch_ms":0}]"""
+        ).single()
+
+        assertEquals(0L, fractional.createdAtEpochMillis)
+        assertEquals(0L, numericString.createdAtEpochMillis)
+        assertEquals(0L, nonPositive.createdAtEpochMillis)
     }
 
     @Test
@@ -483,7 +502,8 @@ class SessionModelSyncTest {
             profileName = "bot-a",
             text = "send only after user confirms",
             deliveryState = QueuedPromptDeliveryState.Indeterminate,
-            deliveryDetail = "Gateway acknowledgement timed out"
+            deliveryDetail = "Gateway acknowledgement timed out",
+            createdAtEpochMillis = 0L
         )
         val outbox = SessionOutbox(listOf(held))
 
@@ -494,6 +514,7 @@ class SessionModelSyncTest {
         assertEquals("bot-a", replacement.profileName)
         assertEquals(QueuedPromptDeliveryState.Pending, replacement.deliveryState)
         assertNull(replacement.deliveryDetail)
+        assertTrue(replacement.createdAtEpochMillis > 0L)
         assertEquals(replacement, outbox.nextFor("bot-a", "stored-a"))
         assertEquals(1, outbox.size)
     }
