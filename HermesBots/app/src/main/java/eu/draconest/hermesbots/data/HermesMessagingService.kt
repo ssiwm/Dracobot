@@ -24,10 +24,10 @@ class HermesMessagingService : FirebaseMessagingService() {
     override fun onMessageReceived(message: RemoteMessage) {
         val title = message.notification?.title ?: "Hermes Bots"
         val body = message.notification?.body ?: message.data["body"] ?: ""
-        showNotification(title, body)
+        showNotification(title, body, notificationTargetFromPayload(message.data))
     }
 
-    private fun showNotification(title: String, body: String) {
+    private fun showNotification(title: String, body: String, target: NotificationTarget?) {
         val ctx = applicationContext
         val manager = androidx.core.app.NotificationManagerCompat.from(ctx)
         if (android.os.Build.VERSION.SDK_INT >= 26) {
@@ -41,9 +41,14 @@ class HermesMessagingService : FirebaseMessagingService() {
         val intent = android.content.Intent(ctx, eu.draconest.hermesbots.MainActivity::class.java).apply {
             flags = android.content.Intent.FLAG_ACTIVITY_NEW_TASK or
                 android.content.Intent.FLAG_ACTIVITY_CLEAR_TOP
+            target?.let {
+                putExtra(NOTIFICATION_PROFILE_EXTRA, it.profileName)
+                putExtra(NOTIFICATION_STORED_SESSION_EXTRA, it.storedSessionId)
+            }
         }
+        val notificationId = target?.let(::notificationIdFor) ?: NOTIF_ID
         val pending = android.app.PendingIntent.getActivity(
-            ctx, 0, intent,
+            ctx, notificationId, intent,
             android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE
         )
         val notif = androidx.core.app.NotificationCompat.Builder(ctx, CHANNEL_ID)
@@ -54,7 +59,7 @@ class HermesMessagingService : FirebaseMessagingService() {
             .setContentIntent(pending)
             .build()
         try {
-            androidx.core.app.NotificationManagerCompat.from(ctx).notify(NOTIF_ID, notif)
+            androidx.core.app.NotificationManagerCompat.from(ctx).notify(notificationId, notif)
         } catch (e: SecurityException) {
             Log.w(TAG, "brak uprawnien POST_NOTIFICATIONS", e)
         }

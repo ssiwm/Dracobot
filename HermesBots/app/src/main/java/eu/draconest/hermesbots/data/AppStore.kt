@@ -14,8 +14,10 @@ internal object QueuedPromptSnapshotCodec {
             put(JSONObject()
                 .put("id", entry.id)
                 .put("stored_session_id", entry.storedSessionId)
+                .put("profile_name", entry.profileName)
                 .put("text", entry.text)
-                .put("delivery_state", entry.deliveryState.name))
+                .put("delivery_state", entry.deliveryState.name)
+                .put("delivery_detail", entry.deliveryDetail))
         }
     }.toString()
 
@@ -27,14 +29,18 @@ internal object QueuedPromptSnapshotCodec {
                 val id = entry.optString("id").trim()
                 val storedSessionId = entry.optString("stored_session_id").trim()
                 if (id.isEmpty() || storedSessionId.isEmpty()) continue
+                val profileName = entry.optString("profile_name").trim().ifBlank { null }
+                val deliveryDetail = entry.optString("delivery_detail").trim().ifBlank { null }
                 val deliveryState = runCatching {
                     QueuedPromptDeliveryState.valueOf(entry.optString("delivery_state"))
-                }.getOrDefault(QueuedPromptDeliveryState.Pending)
+                }.getOrDefault(QueuedPromptDeliveryState.Indeterminate)
                 add(QueuedPrompt(
                     id = id,
                     storedSessionId = storedSessionId,
+                    profileName = profileName,
                     text = entry.optString("text"),
-                    deliveryState = deliveryState
+                    deliveryState = deliveryState,
+                    deliveryDetail = deliveryDetail
                 ))
             }
         }
@@ -43,18 +49,22 @@ internal object QueuedPromptSnapshotCodec {
     }
 }
 
-/**
- * Trwały stan apki: logowanie (zaszyfrowane), ostatni bot/rozmowa.
- */
-class AppStore(private val context: Context) {
-
-    private val prefs: SharedPreferences = EncryptedSharedPreferences.create(
+private fun encryptedPreferences(context: Context): SharedPreferences =
+    EncryptedSharedPreferences.create(
         context,
         "hermes_bots_secure",
         MasterKey.Builder(context).setKeyScheme(MasterKey.KeyScheme.AES256_GCM).build(),
         EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
         EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
     )
+
+/**
+ * Trwały stan apki: logowanie (zaszyfrowane), ostatni bot/rozmowa.
+ */
+class AppStore(
+    private val context: Context,
+    private val prefs: SharedPreferences = encryptedPreferences(context)
+) {
 
     var url: String
         get() = prefs.getString(KEY_URL, "https://bots.draconest.eu") ?: "https://bots.draconest.eu"

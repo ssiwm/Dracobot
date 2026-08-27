@@ -2,6 +2,7 @@ package eu.draconest.hermesbots.data
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -351,9 +352,9 @@ class SessionModelSyncTest {
     @Test
     fun outboxRetainsPromptUntilGatewayAcknowledgesIt() {
         val outbox = SessionOutbox()
-        outbox.enqueue("stored-a", "prompt-a")
+        outbox.enqueue("stored-a", "prompt-a", "bot-a")
 
-        val pending = outbox.nextFor("stored-a")
+        val pending = outbox.nextFor("bot-a", "stored-a")
         assertEquals("prompt-a", pending?.text)
         assertEquals(1, outbox.size)
 
@@ -364,8 +365,8 @@ class SessionModelSyncTest {
     @Test
     fun explicitGatewayRejectionDoesNotDropOutboxEntry() {
         val outbox = SessionOutbox()
-        outbox.enqueue("stored-a", "prompt-a")
-        val pending = outbox.nextFor("stored-a")!!
+        outbox.enqueue("stored-a", "prompt-a", "bot-a")
+        val pending = outbox.nextFor("bot-a", "stored-a")!!
 
         assertTrue(outbox.reject(pending))
         assertEquals(1, outbox.size)
@@ -374,23 +375,71 @@ class SessionModelSyncTest {
     @Test
     fun authoritativeContinuationRebindMovesOnlyThatDurableSessionsOutbox() {
         val outbox = SessionOutbox()
-        outbox.enqueue("stored-parent", "parent prompt")
-        outbox.enqueue("stored-other", "other prompt")
+        outbox.enqueue("stored-parent", "parent prompt", "bot-a")
+        outbox.enqueue("stored-other", "other prompt", "bot-a")
 
-        assertEquals(1, outbox.rebindStoredSession("stored-parent", "stored-successor"))
-        assertEquals("parent prompt", outbox.nextFor("stored-successor")?.text)
-        assertEquals("other prompt", outbox.nextFor("stored-other")?.text)
-        assertTrue(outbox.nextFor("stored-parent") == null)
+        assertEquals(1, outbox.rebindStoredSession("bot-a", "stored-parent", "stored-successor"))
+        assertEquals("parent prompt", outbox.nextFor("bot-a", "stored-successor")?.text)
+        assertEquals("other prompt", outbox.nextFor("bot-a", "stored-other")?.text)
+        assertTrue(outbox.nextFor("bot-a", "stored-parent") == null)
+    }
+
+    @Test
+    fun authoritativeRebindIsLimitedToTheMatchingProfileAndNeverMigratesLegacyEntries() {
+        val alpha = QueuedPrompt(
+            id = "alpha",
+            storedSessionId = "stored-shared",
+            profileName = "alpha",
+            text = "alpha prompt"
+        )
+        val beta = QueuedPrompt(
+            id = "beta",
+            storedSessionId = "stored-shared",
+            profileName = "beta",
+            text = "beta prompt"
+        )
+        val legacy = QueuedPrompt(
+            id = "legacy",
+            storedSessionId = "stored-shared",
+            text = "legacy prompt"
+        )
+        val outbox = SessionOutbox(listOf(alpha, beta, legacy))
+
+        assertEquals(1, outbox.rebindStoredSession("alpha", "stored-shared", "stored-alpha-successor"))
+        assertEquals("alpha prompt", outbox.nextFor("alpha", "stored-alpha-successor")?.text)
+        assertEquals("beta prompt", outbox.nextFor("beta", "stored-shared")?.text)
+        assertNull(outbox.nextFor("alpha", "stored-shared"))
+        assertEquals("stored-shared", outbox.snapshot().single { it.id == "legacy" }.storedSessionId)
+    }
+
+    @Test
+    fun legacyUnboundPendingEntryIsNeverAutoSendableForAnyProfile() {
+        val legacy = QueuedPrompt(
+            id = "legacy",
+            storedSessionId = "stored-shared",
+            text = "legacy prompt"
+        )
+        val alpha = QueuedPrompt(
+            id = "alpha",
+            storedSessionId = "stored-shared",
+            profileName = "alpha",
+            text = "alpha prompt"
+        )
+        val outbox = SessionOutbox(listOf(legacy, alpha))
+
+        assertEquals(alpha, outbox.nextFor("alpha", "stored-shared"))
+        assertNull(outbox.nextFor("beta", "stored-shared"))
+        assertEquals(legacy, outbox.snapshot().single { it.id == "legacy" })
     }
 
     @Test
     fun persistedOutboxSnapshotSurvivesProcessReconstruction() {
         val beforeProcessDeath = SessionOutbox().apply {
-            enqueue("stored-a", "durable prompt")
+            enqueue("stored-a", "durable prompt", "bot-a")
         }
 
         val restored = SessionOutbox(beforeProcessDeath.snapshot())
-        assertEquals("durable prompt", restored.nextFor("stored-a")?.text)
+        assertEquals("durable prompt", restored.nextFor("bot-a", "stored-a")?.text)
         assertEquals(1, restored.size)
     }
 
@@ -400,8 +449,10 @@ class SessionModelSyncTest {
             QueuedPrompt(
                 id = "prompt-1",
                 storedSessionId = "stored-a",
+                profileName = "bot-a",
                 text = "durable prompt",
-                deliveryState = QueuedPromptDeliveryState.Indeterminate
+                deliveryState = QueuedPromptDeliveryState.Indeterminate,
+                deliveryDetail = "Gateway acknowledgement timed out"
             )
         )
 
@@ -412,20 +463,80 @@ class SessionModelSyncTest {
     }
 
     @Test
+    fun unknownOrMissingPersistedDeliveryStateIsHeldForExplicitResolution() {
+        val unknown = QueuedPromptSnapshotCodec.decode(
+            """[{"id":"future","stored_session_id":"stored-a","profile_name":"bot-a","text":"future","delivery_state":"FutureState"}]"""
+        ).single()
+        val missing = QueuedPromptSnapshotCodec.decode(
+            """[{"id":"legacy","stored_session_id":"stored-b","profile_name":"bot-a","text":"legacy"}]"""
+        ).single()
+
+        assertEquals(QueuedPromptDeliveryState.Indeterminate, unknown.deliveryState)
+        assertEquals(QueuedPromptDeliveryState.Indeterminate, missing.deliveryState)
+    }
+
+    @Test
+    fun explicitResendCreatesANewPendingEntryAndKeepsTheProfileBinding() {
+        val held = QueuedPrompt(
+            id = "held-entry",
+            storedSessionId = "stored-a",
+            profileName = "bot-a",
+            text = "send only after user confirms",
+            deliveryState = QueuedPromptDeliveryState.Indeterminate,
+            deliveryDetail = "Gateway acknowledgement timed out"
+        )
+        val outbox = SessionOutbox(listOf(held))
+
+        val replacement = outbox.requeueAsNew(held)
+
+        assertTrue(replacement != null)
+        assertFalse(replacement!!.id == held.id)
+        assertEquals("bot-a", replacement.profileName)
+        assertEquals(QueuedPromptDeliveryState.Pending, replacement.deliveryState)
+        assertNull(replacement.deliveryDetail)
+        assertEquals(replacement, outbox.nextFor("bot-a", "stored-a"))
+        assertEquals(1, outbox.size)
+    }
+
+    @Test
+    fun pendingEntryCannotBeRequeuedAsNewWithoutAResolutionState() {
+        val pending = QueuedPrompt(
+            id = "pending-entry",
+            storedSessionId = "stored-a",
+            profileName = "bot-a",
+            text = "still eligible for automatic delivery"
+        )
+        val outbox = SessionOutbox(listOf(pending))
+
+        assertNull(outbox.requeueAsNew(pending))
+        assertEquals(pending, outbox.nextFor("bot-a", "stored-a"))
+    }
+
+    @Test
     fun sessionOutboxNeverReturnsAnotherSessionsPromptAndRetainsUnacknowledgedPrompt() {
         val outbox = SessionOutbox()
-        outbox.enqueue("stored-a", "prompt-a")
-        outbox.enqueue("stored-b", "prompt-b")
+        outbox.enqueue("stored-a", "prompt-a", "bot-a")
+        outbox.enqueue("stored-b", "prompt-b", "bot-a")
 
-        val promptForB = outbox.nextFor("stored-b")
+        val promptForB = outbox.nextFor("bot-a", "stored-b")
         assertEquals("prompt-b", promptForB?.text)
         assertTrue(outbox.acknowledge(promptForB!!))
         assertEquals(1, outbox.size)
 
-        val promptForA = outbox.nextFor("stored-a")
+        val promptForA = outbox.nextFor("bot-a", "stored-a")
         assertEquals("prompt-a", promptForA?.text)
         // A failed/unknown transport result has no gateway acknowledgement.
         assertEquals(1, outbox.size)
+    }
+
+    @Test
+    fun acknowledgedOutboxEntryCannotBeClaimedForADelayedSecondSubmission() {
+        val outbox = SessionOutbox()
+        val entry = outbox.enqueue("stored-a", "prompt-a", "bot-a")
+
+        assertTrue(canSubmitOutboxEntry(outbox.entryById(entry.id), entry))
+        assertTrue(outbox.acknowledge(entry))
+        assertFalse(canSubmitOutboxEntry(outbox.entryById(entry.id), entry))
     }
 
     @Test

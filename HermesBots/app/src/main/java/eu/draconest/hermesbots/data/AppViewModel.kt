@@ -209,14 +209,22 @@ internal enum class QueuedPromptDeliveryState { Pending, Rejected, Indeterminate
 internal data class QueuedPrompt(
     val id: String = java.util.UUID.randomUUID().toString(),
     val storedSessionId: String,
+    /** Optional for legacy snapshots; new entries bind to the bot that owns the durable session. */
+    val profileName: String? = null,
     val text: String,
-    val deliveryState: QueuedPromptDeliveryState = QueuedPromptDeliveryState.Pending
+    val deliveryState: QueuedPromptDeliveryState = QueuedPromptDeliveryState.Pending,
+    /** Human-readable gateway reason for an explicitly rejected delivery; absent for legacy entries. */
+    val deliveryDetail: String? = null
 )
 
 internal fun canFlushSessionOutbox(
     awaitingDeferredTurnBoundary: Boolean,
     awaitingDeferredModelResolution: Boolean
 ): Boolean = !awaitingDeferredTurnBoundary && !awaitingDeferredModelResolution
+
+/** A direct submit may proceed only while this exact durable entry is still Pending and owned. */
+internal fun canSubmitOutboxEntry(current: QueuedPrompt?, expected: QueuedPrompt): Boolean =
+    current?.id == expected.id && current.deliveryState == QueuedPromptDeliveryState.Pending
 
 /**
  * FIFO prompts scoped to a durable session. A write to a WebSocket is not an ACK:
@@ -232,35 +240,55 @@ internal class SessionOutbox(initialEntries: List<QueuedPrompt> = emptyList()) {
     fun snapshot(): List<QueuedPrompt> = entries.toList()
 
     @Synchronized
+    fun entryById(id: String): QueuedPrompt? = entries.firstOrNull { it.id == id }
+
+    @Synchronized
     fun restore(snapshot: List<QueuedPrompt>) {
         entries.clear()
         entries += snapshot
     }
 
     @Synchronized
-    fun enqueue(storedSessionId: String, text: String): QueuedPrompt {
+    fun enqueue(storedSessionId: String, text: String, profileName: String? = null): QueuedPrompt {
         val durableId = storedSessionId.trim()
         require(durableId.isNotEmpty()) { "Outbox requires a durable session key" }
-        return QueuedPrompt(storedSessionId = durableId, text = text).also { entries += it }
+        val normalizedProfile = profileName?.trim()?.ifBlank { null }
+        return QueuedPrompt(
+            storedSessionId = durableId,
+            profileName = normalizedProfile,
+            text = text
+        ).also { entries += it }
     }
 
-    /** First entry for this durable session regardless of whether it can be auto-sent. */
+
+    /**
+     * Auto-delivery scopes are bound to an authenticated profile and its durable session key.
+     * Legacy entries without a profile intentionally never match this API.
+     */
     @Synchronized
-    fun headFor(storedSessionId: String): QueuedPrompt? =
-        entries.firstOrNull { it.storedSessionId == storedSessionId.trim() }
+    fun headFor(profileName: String, storedSessionId: String): QueuedPrompt? {
+        val profile = profileName.trim()
+        val stored = storedSessionId.trim()
+        if (profile.isEmpty() || stored.isEmpty()) return null
+        return entries.firstOrNull { it.profileName == profile && it.storedSessionId == stored }
+    }
 
     /** A direct submit is permitted only for the oldest entry in this durable-session FIFO. */
     @Synchronized
     fun isHead(entry: QueuedPrompt): Boolean =
-        entries.firstOrNull { it.storedSessionId == entry.storedSessionId }?.id == entry.id
+        entry.profileName != null && entries.firstOrNull {
+            it.profileName == entry.profileName && it.storedSessionId == entry.storedSessionId
+        }?.id == entry.id
 
     /**
      * Returns the oldest automatically-sendable prompt for this exact durable session.
      * A rejected or ambiguous oldest item deliberately blocks later entries to preserve FIFO.
      */
+
+    /** Returns an auto-sendable prompt only for the exact bound profile/session pair. */
     @Synchronized
-    fun nextFor(storedSessionId: String): QueuedPrompt? =
-        headFor(storedSessionId)?.takeIf { it.deliveryState == QueuedPromptDeliveryState.Pending }
+    fun nextFor(profileName: String, storedSessionId: String): QueuedPrompt? =
+        headFor(profileName, storedSessionId)?.takeIf { it.deliveryState == QueuedPromptDeliveryState.Pending }
 
     /** Removes exactly the prompt whose delivery was acknowledged by the gateway. */
     @Synchronized
@@ -268,9 +296,10 @@ internal class SessionOutbox(initialEntries: List<QueuedPrompt> = emptyList()) {
 
     /** Keeps a known-rejected prompt for explicit user resolution; never silently replay it. */
     @Synchronized
-    fun reject(entry: QueuedPrompt): Boolean = updateDeliveryState(
+    fun reject(entry: QueuedPrompt, detail: String? = null): Boolean = updateDeliveryState(
         entry,
-        QueuedPromptDeliveryState.Rejected
+        QueuedPromptDeliveryState.Rejected,
+        detail
     )
 
     /** A sent frame without an ACK may have reached the gateway, so replay would risk duplication. */
@@ -280,25 +309,59 @@ internal class SessionOutbox(initialEntries: List<QueuedPrompt> = emptyList()) {
         QueuedPromptDeliveryState.Indeterminate
     )
 
-    private fun updateDeliveryState(entry: QueuedPrompt, state: QueuedPromptDeliveryState): Boolean {
+    /**
+     * A user explicitly chose to create a fresh delivery attempt. The original retained
+     * entry is replaced in-place with a new identity, preserving durable FIFO ordering.
+     */
+    @Synchronized
+    fun requeueAsNew(entry: QueuedPrompt): QueuedPrompt? {
+        val index = entries.indexOfFirst { it.id == entry.id }
+        if (index < 0) return null
+        val current = entries[index]
+        if (current.deliveryState == QueuedPromptDeliveryState.Pending) return null
+        return current.copy(
+            id = java.util.UUID.randomUUID().toString(),
+            deliveryState = QueuedPromptDeliveryState.Pending,
+            deliveryDetail = null
+        ).also { entries[index] = it }
+    }
+
+    /** Explicit user discard: never affects an entry from another durable session. */
+    @Synchronized
+    fun discard(entryId: String): QueuedPrompt? {
+        val index = entries.indexOfFirst { it.id == entryId }
+        return if (index < 0) null else entries.removeAt(index)
+    }
+
+    private fun updateDeliveryState(
+        entry: QueuedPrompt,
+        state: QueuedPromptDeliveryState,
+        detail: String? = null
+    ): Boolean {
         val index = entries.indexOfFirst { it.id == entry.id }
         if (index < 0) return false
-        entries[index] = entries[index].copy(deliveryState = state)
+        entries[index] = entries[index].copy(
+            deliveryState = state,
+            deliveryDetail = detail?.trim()?.ifBlank { null }
+        )
         return true
     }
 
-    /**
-     * session.resume may resolve a compressed parent session to a successor.
-     * Rebinding occurs only after that authoritative response, preserving other chats.
-     */
+
+    /** Rebind a continuation successor only in the authoritative profile's bound scope. */
     @Synchronized
-    fun rebindStoredSession(previousStoredSessionId: String, resumedStoredSessionId: String): Int {
+    fun rebindStoredSession(
+        profileName: String,
+        previousStoredSessionId: String,
+        resumedStoredSessionId: String
+    ): Int {
+        val profile = profileName.trim()
         val previous = previousStoredSessionId.trim()
         val resumed = resumedStoredSessionId.trim()
-        if (previous.isEmpty() || resumed.isEmpty() || previous == resumed) return 0
+        if (profile.isEmpty() || previous.isEmpty() || resumed.isEmpty() || previous == resumed) return 0
         var moved = 0
         entries.replaceAll { entry ->
-            if (entry.storedSessionId == previous) {
+            if (entry.profileName == profile && entry.storedSessionId == previous) {
                 moved += 1
                 entry.copy(storedSessionId = resumed)
             } else {
@@ -324,6 +387,7 @@ class AppViewModel(
     fun initializeStore(appStore: AppStore) {
         store = appStore
         outbox.restore(appStore.queuedPrompts)
+        publishOutboxSnapshot()
     }
 
     val connected = MutableStateFlow(false)
@@ -585,11 +649,13 @@ class AppViewModel(
        val durableSessionId = storedSessionId ?: return
        val generation = sessionGeneration
        val regenerationPrompt = "Powtórz poprzednie zadanie, odpowiedz inaczej/lepiej. Zadanie: $lastUser"
-       val entry = outbox.enqueue(durableSessionId, regenerationPrompt)
+       val profileName = activeBot.value?.name ?: return
+       val entry = outbox.enqueue(durableSessionId, regenerationPrompt, profileName)
        persistOutbox()
        thinking.value = true
        viewModelScope.launch {
            outboxFlushMutex.withLock {
+               if (!canSubmitOutboxEntry(outbox.entryById(entry.id), entry)) return@withLock
                if (deferBehindEarlierOutboxEntry(entry)) return@withLock
                when (val result = client.submitPromptResult(sid, entry.text)) {
                    is PromptSubmissionResult.Accepted -> {
@@ -610,7 +676,7 @@ class AppViewModel(
                        quietReconnectLoop()
                    }
                    is PromptSubmissionResult.Rejected -> {
-                       outbox.reject(entry)
+                       outbox.reject(entry, result.message)
                        persistOutbox()
                        if (isCurrentPromptScope(sid, durableSessionId, generation)) {
                            thinking.value = false
@@ -799,10 +865,38 @@ class AppViewModel(
     private var linkWatchJob: Job? = null
     private var reconnectJob: Job? = null
     private val outbox = SessionOutbox() // durable-session-scoped prompts waiting for a usable link
+    private val _outboxEntries = MutableStateFlow<List<QueuedPrompt>>(emptyList())
+    internal val outboxEntries = _outboxEntries.asStateFlow()
     private val outboxFlushMutex = Mutex()
 
+    private fun publishOutboxSnapshot() {
+        _outboxEntries.value = outbox.snapshot()
+    }
+
     private fun persistOutbox() {
-        if (::store.isInitialized) store.queuedPrompts = outbox.snapshot()
+        val snapshot = outbox.snapshot()
+        _outboxEntries.value = snapshot
+        if (::store.isInitialized) store.queuedPrompts = snapshot
+    }
+
+    /** Removes an entry only after an explicit user choice from the Outbox Center. */
+    fun discardOutboxEntry(entryId: String) {
+        if (outbox.discard(entryId) != null) persistOutbox()
+    }
+
+    /**
+     * Explicit resend creates a new entry identity. It is never an automatic retry of an
+     * unacknowledged frame; it can drain only in the matching active profile/session.
+     */
+    fun resendOutboxEntryAsNew(entryId: String) {
+        val held = outbox.entryById(entryId) ?: return
+        val profileName = held.profileName ?: return
+        val replacement = outbox.requeueAsNew(held) ?: return
+        persistOutbox()
+        val matchingActiveProfile = profileName == activeBot.value?.name
+        if (matchingActiveProfile && replacement.storedSessionId == storedSessionId) {
+            flushOutbox()
+        }
     }
 
     /** Move only the exact durable key that session.resume authoritatively resolved to a successor. */
@@ -810,7 +904,8 @@ class AppViewModel(
         requestedStoredSessionId: String,
         resumedStoredSessionId: String
     ) {
-        if (outbox.rebindStoredSession(requestedStoredSessionId, resumedStoredSessionId) > 0) {
+        val profileName = activeBot.value?.name ?: return
+        if (outbox.rebindStoredSession(profileName, requestedStoredSessionId, resumedStoredSessionId) > 0) {
             persistOutbox()
         }
     }
@@ -949,7 +1044,8 @@ class AppViewModel(
      */
     private suspend fun deferBehindEarlierOutboxEntry(entry: QueuedPrompt): Boolean {
         if (outbox.isHead(entry)) return false
-        when (outbox.headFor(entry.storedSessionId)?.deliveryState) {
+        val profileName = entry.profileName ?: return true
+        when (outbox.headFor(profileName, entry.storedSessionId)?.deliveryState) {
             QueuedPromptDeliveryState.Pending -> flushOutboxNow()
             QueuedPromptDeliveryState.Rejected,
             QueuedPromptDeliveryState.Indeterminate -> {
@@ -977,8 +1073,9 @@ class AppViewModel(
         ) return
         val sid = sessionId ?: return
         val durableSessionId = storedSessionId ?: return
+        val profileName = activeBot.value?.name ?: return
         val generation = sessionGeneration
-        val entry = outbox.nextFor(durableSessionId) ?: return
+        val entry = outbox.nextFor(profileName, durableSessionId) ?: return
         when (val result = client.submitPromptResult(sid, entry.text, queued = true)) {
             is PromptSubmissionResult.Accepted -> {
                 outbox.acknowledge(entry)
@@ -992,7 +1089,7 @@ class AppViewModel(
                 // Exactly one ACKed prompt per flush: the next turn must reach a terminal state first.
             }
             is PromptSubmissionResult.Rejected -> {
-                outbox.reject(entry)
+                outbox.reject(entry, result.message)
                 persistOutbox()
                 if (isCurrentPromptScope(sid, durableSessionId, generation)) {
                     appendPromptDeliveryNotice(result.message)
@@ -1334,6 +1431,53 @@ class AppViewModel(
         }
     }
 
+    /** Opens the exact durable chat named by an FCM target or an Outbox Center item. */
+    fun openNotificationTarget(target: NotificationTarget): Boolean =
+        openStoredSession(target.profileName, target.storedSessionId)
+
+    fun openOutboxEntry(entryId: String): Boolean {
+        val entry = outbox.entryById(entryId) ?: return false
+        val profile = entry.profileName ?: return false
+        return openStoredSession(profile, entry.storedSessionId)
+    }
+
+    private fun openStoredSession(profileName: String, requestedStoredSessionId: String): Boolean {
+        if (!connected.value || profileName.isBlank() || requestedStoredSessionId.isBlank()) return false
+        val bot = bots.value.firstOrNull { it.name == profileName } ?: return false
+        activeBot.value = bot
+        sessions.value = emptyList()
+        messages.value = emptyList()
+        val generation = beginSessionTransition()
+        if (::store.isInitialized) store.lastBotName = bot.name
+        thinking.value = true
+        viewModelScope.launch {
+            var resumedRunning = false
+            try {
+                val resumed = client.resumeSession(bot.name, requestedStoredSessionId)
+                resumedRunning = resumed.isRunning
+                if (!activateSession(
+                        generation = generation,
+                        handle = resumed.handle,
+                        model = resumed.model,
+                        provider = resumed.provider,
+                        requestedStoredSessionId = requestedStoredSessionId
+                    )) return@launch
+                messages.value = resumed.messages.map { (fromUser, text) ->
+                    ChatMessage(ChatMessage.nextId(), fromUser, text)
+                }
+            } catch (e: Exception) {
+                if (shouldApplySessionUpdate(generation, sessionGeneration)) {
+                    messages.value = listOf(ChatMessage(ChatMessage.nextId(), false, "⚠️ ${e.message}"))
+                }
+            } finally {
+                if (shouldApplySessionUpdate(generation, sessionGeneration)) {
+                    thinking.value = resumedRunning
+                }
+            }
+        }
+        return true
+    }
+
     fun send(text: String) {
         val sid = sessionId ?: return
         val durableSessionId = storedSessionId ?: return
@@ -1342,7 +1486,8 @@ class AppViewModel(
             awaitingDeferredModelResolution.value
         ) return
         val generation = sessionGeneration
-        val entry = outbox.enqueue(durableSessionId, text)
+        val profileName = activeBot.value?.name ?: return
+        val entry = outbox.enqueue(durableSessionId, text, profileName)
         persistOutbox()
         markChatStateMutation()
         thinking.value = true
@@ -1353,6 +1498,7 @@ class AppViewModel(
         thinkingOpen.value = true
         viewModelScope.launch {
             outboxFlushMutex.withLock {
+                if (!canSubmitOutboxEntry(outbox.entryById(entry.id), entry)) return@withLock
                 if (deferBehindEarlierOutboxEntry(entry)) return@withLock
                 when (val result = client.submitPromptResult(sid, entry.text)) {
                     is PromptSubmissionResult.Accepted -> {
@@ -1374,7 +1520,7 @@ class AppViewModel(
                         quietReconnectLoop()
                     }
                     is PromptSubmissionResult.Rejected -> {
-                        outbox.reject(entry)
+                        outbox.reject(entry, result.message)
                         persistOutbox()
                         if (isCurrentPromptScope(sid, durableSessionId, generation)) {
                             thinking.value = false
@@ -1420,6 +1566,11 @@ class AppViewModel(
     /** Czy pokazujemy panel Routines zamiast rozmow (stan UI). */
     private val _viewRoutines = MutableStateFlow(false)
     val viewRoutines = _viewRoutines.asStateFlow()
+    private val _viewOutbox = MutableStateFlow(false)
+    val viewOutbox = _viewOutbox.asStateFlow()
+
+    fun openOutbox() { _viewOutbox.value = true }
+    fun closeOutbox() { _viewOutbox.value = false }
 
     fun openRoutines() {
         val bot = activeBot.value ?: return

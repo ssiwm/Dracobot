@@ -285,6 +285,64 @@ class AppViewModelProtocolTest {
         )
     }
 
+    @Test
+    fun outboxCenterExplicitResendCreatesFreshQueuedAttemptForTheActiveDurableSession() = runTest(dispatcher) {
+        val fake = FakeGatewayClient()
+        val viewModel = openResumedChat(fake)
+
+        fake.promptResults += PromptSubmissionResult.Rejected(code = 4001, message = "Gateway rejected first")
+        viewModel.send("first")
+        advanceUntilIdle()
+        val held = viewModel.outboxEntries.value.single()
+        assertEquals(QueuedPromptDeliveryState.Rejected, held.deliveryState)
+        assertEquals("Gateway rejected first", held.deliveryDetail)
+
+        fake.promptResults += PromptSubmissionResult.Accepted("queued")
+        viewModel.resendOutboxEntryAsNew(held.id)
+        advanceUntilIdle()
+
+        assertEquals(
+            listOf(
+                PromptCall("runtime-a", "first", queued = false),
+                PromptCall("runtime-a", "first", queued = true)
+            ),
+            fake.promptCalls
+        )
+        assertTrue(viewModel.outboxEntries.value.isEmpty())
+    }
+
+    @Test
+    fun outboxCenterDiscardRemovesHeldEntryWithoutAnyAdditionalTransportAttempt() = runTest(dispatcher) {
+        val fake = FakeGatewayClient()
+        val viewModel = openResumedChat(fake)
+
+        fake.promptResults += PromptSubmissionResult.Indeterminate
+        viewModel.send("first")
+        advanceUntilIdle()
+        val held = viewModel.outboxEntries.value.single()
+
+        viewModel.discardOutboxEntry(held.id)
+        viewModel.flushOutbox()
+        advanceUntilIdle()
+
+        assertEquals(listOf(PromptCall("runtime-a", "first", queued = false)), fake.promptCalls)
+        assertTrue(viewModel.outboxEntries.value.isEmpty())
+    }
+
+    @Test
+    fun notificationTargetResumesItsExactProfileAndDurableSession() = runTest(dispatcher) {
+        val fake = FakeGatewayClient()
+        val viewModel = AppViewModel(fake)
+        viewModel.connect("http://localhost", "", "")
+        advanceUntilIdle()
+
+        assertTrue(viewModel.openNotificationTarget(NotificationTarget("bot-a", "stored-notification")))
+        advanceUntilIdle()
+
+        assertEquals(listOf("bot-a" to "stored-notification"), fake.resumeCalls)
+        assertEquals(BOT, viewModel.activeBot.value)
+    }
+
     private suspend fun TestScope.openResumedChat(
         fake: FakeGatewayClient,
         modelSwitchTimeoutMs: Long = 12_000L
@@ -314,6 +372,7 @@ class AppViewModelProtocolTest {
         var nextPromptResult: PromptSubmissionResult = PromptSubmissionResult.Accepted("streaming")
         val promptResults = ArrayDeque<PromptSubmissionResult>()
         val promptCalls = mutableListOf<PromptCall>()
+        val resumeCalls = mutableListOf<Pair<String, String>>()
         var modelSwitchCalls = 0
         var setModelHandler: suspend (String, String, String, Boolean, Long) -> ModelSwitchResult =
             { _, _, _, _, _ -> ModelSwitchResult.Applied }
@@ -324,7 +383,10 @@ class AppViewModelProtocolTest {
 
         override suspend fun rosterSummary(profile: String): RosterSummary? = null
 
-        override suspend fun resumeSession(profile: String, sessionId: String): ResumedSession = resumed
+        override suspend fun resumeSession(profile: String, sessionId: String): ResumedSession {
+            resumeCalls += profile to sessionId
+            return resumed
+        }
 
         override suspend fun modelOptions(sessionId: String?): ModelOptionsPayload = ModelOptionsPayload(
             providers = emptyList(),

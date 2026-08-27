@@ -1,6 +1,5 @@
 package eu.draconest.hermesbots.data
 
-import eu.draconest.hermesbots.BuildConfig
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.TimeoutCancellationException
@@ -161,20 +160,6 @@ internal sealed interface PromptSubmissionResult {
 
 private const val PROMPT_ACK_TIMEOUT_MS = 12_000L
 private const val MODEL_SWITCH_TIMEOUT_MS = 12_000L
-private const val DEBUG_TLS_FACTORY = "eu.draconest.hermesbots.data.DebugGatewayTls"
-
-/**
- * Debug source supplies the relaxation factory for a local self-signed gateway. Its bytecode is
- * absent from release, whose client therefore always remains on platform certificate validation.
- */
-private fun debugTlsIfAvailable(client: OkHttpClient): OkHttpClient {
-    if (!BuildConfig.DEBUG) return client
-    return runCatching {
-        Class.forName(DEBUG_TLS_FACTORY)
-            .getMethod("apply", OkHttpClient::class.java)
-            .invoke(null, client) as? OkHttpClient ?: client
-    }.getOrDefault(client)
-}
 
 /**
  * A guarded model selection is not applied until the user confirms it in a
@@ -348,19 +333,17 @@ open class GatewayClient(private val ok: OkHttpClient = OkHttpClient()) {
         replay = 0, extraBufferCapacity = 256, onBufferOverflow = BufferOverflow.DROP_OLDEST)
     open val events = _events.asSharedFlow()
 
-    // Release always uses platform TLS and hostname validation. Debug-only TLS relaxation lives in src/debug.
-    private val http: OkHttpClient = debugTlsIfAvailable(
-        ok.newBuilder()
-            .addInterceptor { chain ->
-                // Własny UA — Cloudflare nie lubi domyślnego "okhttp"
-                chain.proceed(
-                    chain.request().newBuilder()
-                        .header("User-Agent", "HermesBots/0.5")
-                        .build()
-                )
-            }
-            .build()
-    )
+    /** Always use OkHttp's platform certificate and hostname validation. */
+    private val http: OkHttpClient = ok.newBuilder()
+        .addInterceptor { chain ->
+            // Własny UA — Cloudflare nie lubi domyślnego "okhttp"
+            chain.proceed(
+                chain.request().newBuilder()
+                    .header("User-Agent", "HermesBots/0.5")
+                    .build()
+            )
+        }
+        .build()
 
     /** Pobiera token sesji dashboardu (tryb loopback; opcjonalnie za proxy z Basic Auth). */
     private suspend fun fetchToken(

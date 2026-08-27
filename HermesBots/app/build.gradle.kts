@@ -20,8 +20,8 @@ android {
         applicationId = "eu.draconest.hermesbots"
         minSdk = 26
         targetSdk = 34
-        versionCode = 31
-        versionName = "1.8.6"
+        versionCode = 32
+        versionName = "1.8.7"
     }
 
     signingConfigs {
@@ -62,6 +62,24 @@ android {
         checkReleaseBuilds = false
         abortOnError = false
     }
+    testOptions {
+        unitTests {
+            isIncludeAndroidResources = true
+            all {
+                it.jvmArgs(
+                    "--add-opens=java.base/java.lang=ALL-UNNAMED",
+                    "--add-opens=java.base/java.util=ALL-UNNAMED",
+                    "--add-opens=java.base/java.io=ALL-UNNAMED",
+                    "--add-opens=java.base/java.net=ALL-UNNAMED",
+                    "--add-opens=java.base/java.security=ALL-UNNAMED",
+                    "--add-opens=java.base/java.text=ALL-UNNAMED",
+                    "--add-opens=java.base/jdk.internal.access=ALL-UNNAMED",
+                    "--add-opens=java.desktop/java.awt.font=ALL-UNNAMED",
+                    "--add-opens=jdk.compiler/com.sun.tools.javac.api=ALL-UNNAMED"
+                )
+            }
+        }
+    }
     buildFeatures {
         compose = true
         buildConfig = true
@@ -93,4 +111,5 @@ dependencies {
     testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
     testImplementation("org.json:json:20240303")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.8.1")
+    testImplementation("org.robolectric:robolectric:4.14.1")
 }

@@ -5,6 +5,7 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.annotation.VisibleForTesting
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
@@ -38,23 +39,37 @@ import eu.draconest.hermesbots.data.AppStore
 import eu.draconest.hermesbots.data.AppViewModel
 import eu.draconest.hermesbots.data.CrashGuard
 import eu.draconest.hermesbots.data.HermesMessagingService
+import eu.draconest.hermesbots.data.NOTIFICATION_PROFILE_EXTRA
+import eu.draconest.hermesbots.data.NOTIFICATION_STORED_SESSION_EXTRA
+import eu.draconest.hermesbots.data.NotificationTarget
 import eu.draconest.hermesbots.data.chatActionAvailability
+import eu.draconest.hermesbots.data.notificationTargetFromIntentExtras
 import eu.draconest.hermesbots.ui.ChatScreen
 import eu.draconest.hermesbots.ui.ConnectScreen
 import eu.draconest.hermesbots.ui.DeleteBotDialog
 import eu.draconest.hermesbots.ui.GroupChatScreen
 import eu.draconest.hermesbots.ui.GroupCreateScreen
+import eu.draconest.hermesbots.ui.OutboxScreen
 import eu.draconest.hermesbots.ui.RosterScreen
 import eu.draconest.hermesbots.ui.RoutinesScreen
 import eu.draconest.hermesbots.ui.SessionPickerScreen
 import eu.draconest.hermesbots.ui.theme.HermesBotsTheme
 
-class MainActivity : ComponentActivity() {
+open class MainActivity : ComponentActivity() {
     lateinit var store: AppStore
+    private var pendingNotificationTarget by mutableStateOf<NotificationTarget?>(null)
+
+    @get:VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
+    internal val pendingNotificationTargetForTest: NotificationTarget?
+        get() = pendingNotificationTarget
+
+    /** Test subclasses may provide empty local preferences without weakening production encryption. */
+    protected open fun createAppStore(): AppStore = AppStore(this)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        store = AppStore(this)
+        pendingNotificationTarget = notificationTargetFromIntent(intent)
+        store = createAppStore()
         val lastCrash = CrashGuard.install(this)
         setContent {
             HermesBotsTheme {
@@ -65,12 +80,30 @@ class MainActivity : ComponentActivity() {
                         onDismiss = { crashReport = null }
                     )
                 } else {
-                    AppRoot(appStore = store)
+                    AppRoot(
+                        appStore = store,
+                        pendingNotificationTarget = pendingNotificationTarget,
+                        onNotificationTargetHandled = { pendingNotificationTarget = null }
+                    )
                 }
             }
         }
     }
+
+    override fun onNewIntent(intent: android.content.Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        pendingNotificationTarget = notificationTargetFromIntent(intent)
+    }
 }
+
+private fun notificationTargetFromIntent(intent: android.content.Intent?): NotificationTarget? =
+    intent?.let {
+        notificationTargetFromIntentExtras(
+            it.getStringExtra(NOTIFICATION_PROFILE_EXTRA),
+            it.getStringExtra(NOTIFICATION_STORED_SESSION_EXTRA)
+        )
+    }
 
 @Composable
 private fun rememberPermissionState(): androidx.activity.compose.ManagedActivityResultLauncher<String, Boolean> {
@@ -114,7 +147,12 @@ private fun CrashReportScreen(report: String, onDismiss: () -> Unit) {
 }
 
 @Composable
-private fun AppRoot(vm: AppViewModel = viewModel(), appStore: AppStore) {
+private fun AppRoot(
+    vm: AppViewModel = viewModel(),
+    appStore: AppStore,
+    pendingNotificationTarget: NotificationTarget?,
+    onNotificationTargetHandled: () -> Unit
+) {
     val connected by vm.connected.collectAsState()
     val connecting by vm.connecting.collectAsState()
     val error by vm.connectionError.collectAsState()
@@ -125,6 +163,8 @@ private fun AppRoot(vm: AppViewModel = viewModel(), appStore: AppStore) {
     val sessions by vm.sessions.collectAsState()
     val routines by vm.routines.collectAsState()
     val viewRoutines by vm.viewRoutines.collectAsState()
+    val viewOutbox by vm.viewOutbox.collectAsState()
+    val outboxEntries by vm.outboxEntries.collectAsState()
     val groups by vm.groups.collectAsState()
     val activeGroup by vm.activeGroup.collectAsState()
     val groupLog by vm.groupLog.collectAsState()
@@ -197,6 +237,7 @@ private fun AppRoot(vm: AppViewModel = viewModel(), appStore: AppStore) {
     androidx.activity.compose.BackHandler(enabled = connected) {
         when {
             creatingGroup -> creatingGroup = false
+            viewOutbox -> vm.closeOutbox()
             activeGroup != null -> vm.closeGroup()
             viewRoutines -> vm.closeRoutines()
             sessions.isNotEmpty() || activeBot != null -> vm.closeChat()
@@ -207,6 +248,12 @@ private fun AppRoot(vm: AppViewModel = viewModel(), appStore: AppStore) {
     // tu tylko odswiez liste grup.
     androidx.compose.runtime.LaunchedEffect(connected) {
         if (connected) vm.refreshGroupsList()
+    }
+    androidx.compose.runtime.LaunchedEffect(pendingNotificationTarget, connected, bots) {
+        val target = pendingNotificationTarget ?: return@LaunchedEffect
+        if (connected && vm.openNotificationTarget(target)) {
+            onNotificationTargetHandled()
+        }
     }
 
     when {
@@ -227,6 +274,15 @@ private fun AppRoot(vm: AppViewModel = viewModel(), appStore: AppStore) {
             onCreate = { name, members -> creatingGroup = false; vm.createGroup(name, members) },
             onBack = { creatingGroup = false }
         )
+        viewOutbox -> OutboxScreen(
+            entries = outboxEntries,
+            onOpenConversation = { entry ->
+                if (vm.openOutboxEntry(entry.id)) vm.closeOutbox()
+            },
+            onResendAsNew = { entry -> vm.resendOutboxEntryAsNew(entry.id) },
+            onDiscard = { entry -> vm.discardOutboxEntry(entry.id) },
+            onBack = vm::closeOutbox
+        )
         activeBot == null && activeGroup == null -> {
             RosterScreen(
                 bots = bots,
@@ -235,6 +291,8 @@ private fun AppRoot(vm: AppViewModel = viewModel(), appStore: AppStore) {
                 onOpen = vm::openChat,
                 onOpenGroup = vm::openGroup,
                 onNewGroup = { creatingGroup = true },
+                outboxCount = outboxEntries.size,
+                onOpenOutbox = vm::openOutbox,
                 onRefresh = vm::refreshRoster,
                 onCreateBot = vm::createBot,
                 onDeleteBot = { name -> deleteCandidate = bots.firstOrNull { it.name == name } },
