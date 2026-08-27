@@ -19,6 +19,7 @@ import os
 import sqlite3
 import time
 import urllib.request
+from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Lock
 
@@ -39,6 +40,25 @@ BOTS = ["koder", "designer", "m-drala", "discord-bot"]  # default pomijamy (to t
 _state_lock = Lock()
 _seen = {}          # (bot, session_id) -> last message id wyslanego pusha
 _tokens = set()
+
+
+@dataclass(frozen=True)
+class BridgePollResult:
+    """Privacy-safe aggregate for one polling cycle; excludes message and routing values."""
+
+    candidates: int = 0
+    attempted: int = 0
+    sent: int = 0
+    failed: int = 0
+    suppressed_for_open_app: bool = False
+
+    def log_line(self) -> str:
+        return (
+            "[fcm] poll "
+            f"candidates={self.candidates} attempted={self.attempted} "
+            f"sent={self.sent} failed={self.failed} "
+            f"suppressed_open_app={int(self.suppressed_for_open_app)}"
+        )
 
 
 def load_tokens():
@@ -142,7 +162,7 @@ def fcm_send(title: str, body: str, data: dict[str, str] | None = None) -> bool:
             pass  # uproszczenie: tokeny czysci apka przy przerejestrowaniu
         return any(r.success for r in resp.responses)
     except Exception as e:
-        print(f"[fcm] blad wysylki: {e}", flush=True)
+        print(f"[fcm] delivery_failed error_type={type(e).__name__}", flush=True)
         return False
 
 
@@ -174,17 +194,43 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
 
-def poll_once():
+def poll_once() -> BridgePollResult:
     try:
-        if not app_is_open():
-            for bot in BOTS:
-                for sid, mid, ts, text in fetch_new_assistant_messages(bot):
-                    title = f"🤖 {bot}"
-                    print(f"[push] {title}: {text[:60]!r}", flush=True)
-                    fcm_send(title, text.strip(), notification_data(bot, sid, str(mid)))
-                    time.sleep(0.3)  # rate limit FCM
+        if app_is_open():
+            result = BridgePollResult(suppressed_for_open_app=True)
+            print(result.log_line(), flush=True)
+            return result
+
+        candidates = 0
+        attempted = 0
+        sent = 0
+        failed = 0
+        for bot in BOTS:
+            for sid, mid, ts, text in fetch_new_assistant_messages(bot):
+                candidates += 1
+                attempted += 1
+                delivered = fcm_send(
+                    f"🤖 {bot}",
+                    text.strip(),
+                    notification_data(bot, sid, str(mid))
+                )
+                if delivered:
+                    sent += 1
+                else:
+                    failed += 1
+                time.sleep(0.3)  # rate limit FCM
+
+        result = BridgePollResult(
+            candidates=candidates,
+            attempted=attempted,
+            sent=sent,
+            failed=failed
+        )
+        print(result.log_line(), flush=True)
+        return result
     except Exception as e:
-        print(f"[poll] blad: {e}", flush=True)
+        print(f"[fcm] poll_failed error_type={type(e).__name__}", flush=True)
+        return BridgePollResult(failed=1)
 
 
 def poll_loop():
@@ -212,8 +258,8 @@ def main():
             for sid, mid in rows:
                 _seen[(bot, sid)] = mid
         except Exception as e:
-            print(f"[init] {bot}: {e}", flush=True)
-    print(f"[bridge] start; tokenow: {len(_tokens)}; cred: {CRED_FILE}", flush=True)
+            print(f"[fcm] initialization_failed error_type={type(e).__name__}", flush=True)
+    print(f"[fcm] bridge_started registered_tokens={len(_tokens)}", flush=True)
     server = ThreadingHTTPServer(("127.0.0.1", BRIDGE_PORT), Handler)
     import threading
     threading.Thread(target=poll_loop, daemon=True).start()
