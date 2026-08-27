@@ -22,6 +22,8 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Lock
 
+from fcm_payload import notification_data
+
 # --- konfiguracja -----------------------------------------------------------
 POLL_SECONDS = 4
 PROFILES_DIR = "/home/hermes/.hermes/profiles"
@@ -119,7 +121,7 @@ def app_is_open() -> bool:
 _fcm_app = None
 
 
-def fcm_send(title: str, body: str) -> bool:
+def fcm_send(title: str, body: str, data: dict[str, str] | None = None) -> bool:
     global _fcm_app
     try:
         import firebase_admin
@@ -130,6 +132,7 @@ def fcm_send(title: str, body: str) -> bool:
             return False
         msg = messaging.MulticastMessage(
             notification=messaging.Notification(title=title, body=body[:MAX_PUSH_LEN]),
+            data=data or {},
             tokens=sorted(_tokens),
         )
         resp = messaging.send_each_for_multicast(msg)
@@ -171,18 +174,22 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
 
+def poll_once():
+    try:
+        if not app_is_open():
+            for bot in BOTS:
+                for sid, mid, ts, text in fetch_new_assistant_messages(bot):
+                    title = f"🤖 {bot}"
+                    print(f"[push] {title}: {text[:60]!r}", flush=True)
+                    fcm_send(title, text.strip(), notification_data(bot, sid, str(mid)))
+                    time.sleep(0.3)  # rate limit FCM
+    except Exception as e:
+        print(f"[poll] blad: {e}", flush=True)
+
+
 def poll_loop():
     while True:
-        try:
-            if not app_is_open():
-                for bot in BOTS:
-                    for sid, mid, ts, text in fetch_new_assistant_messages(bot):
-                        title = f"🤖 {bot}"
-                        print(f"[push] {title}: {text[:60]!r}", flush=True)
-                        fcm_send(title, text.strip())
-                        time.sleep(0.3)  # rate limit FCM
-        except Exception as e:
-            print(f"[poll] blad: {e}", flush=True)
+        poll_once()
         time.sleep(POLL_SECONDS)
 
 
