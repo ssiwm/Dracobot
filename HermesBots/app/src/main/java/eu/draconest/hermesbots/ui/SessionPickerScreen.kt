@@ -29,6 +29,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
@@ -59,6 +60,7 @@ fun SessionPickerScreen(
     sessions: List<SessionInfo>,
     onResume: (SessionInfo) -> Unit,
     onNew: () -> Unit,
+    onHistory: () -> Unit,
     onBack: () -> Unit
 ) {
     Scaffold(
@@ -75,6 +77,9 @@ fun SessionPickerScreen(
                     IconButton(onClick = onBack) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, "Wróć")
                     }
+                },
+                actions = {
+                    TextButton(onClick = onHistory) { Text("Historia") }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = MaterialTheme.colorScheme.background

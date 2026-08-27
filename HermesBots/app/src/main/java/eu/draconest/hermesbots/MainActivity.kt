@@ -55,6 +55,7 @@ import eu.draconest.hermesbots.ui.OutboxScreen
 import eu.draconest.hermesbots.ui.RosterScreen
 import eu.draconest.hermesbots.ui.RoutinesScreen
 import eu.draconest.hermesbots.ui.SessionPickerScreen
+import eu.draconest.hermesbots.ui.SessionHistoryScreen
 import eu.draconest.hermesbots.ui.theme.HermesBotsTheme
 
 open class MainActivity : ComponentActivity() {
@@ -167,6 +168,11 @@ private fun AppRoot(
     val viewRoutines by vm.viewRoutines.collectAsState()
     val viewOutbox by vm.viewOutbox.collectAsState()
     val viewHealth by vm.viewHealth.collectAsState()
+    val viewSessionHistory by vm.viewSessionHistory.collectAsState()
+    val sessionHistoryEntries by vm.sessionHistoryEntries.collectAsState()
+    val sessionHistoryArchived by vm.sessionHistoryArchived.collectAsState()
+    val sessionHistoryLoading by vm.sessionHistoryLoading.collectAsState()
+    val sessionHistoryError by vm.sessionHistoryError.collectAsState()
     val outboxEntries by vm.outboxEntries.collectAsState()
     val groups by vm.groups.collectAsState()
     val activeGroup by vm.activeGroup.collectAsState()
@@ -242,6 +248,7 @@ private fun AppRoot(
             creatingGroup -> creatingGroup = false
             viewOutbox -> vm.closeOutbox()
             viewHealth -> vm.closeHealth()
+            viewSessionHistory -> vm.closeSessionHistory()
             activeGroup != null -> vm.closeGroup()
             viewRoutines -> vm.closeRoutines()
             sessions.isNotEmpty() || activeBot != null -> vm.closeChat()
@@ -297,6 +304,24 @@ private fun AppRoot(
             ),
             onBack = vm::closeHealth
         )
+        viewSessionHistory && activeBot != null -> SessionHistoryScreen(
+            bot = activeBot!!,
+            sessions = sessionHistoryEntries,
+            archived = sessionHistoryArchived,
+            loading = sessionHistoryLoading,
+            error = sessionHistoryError,
+            onShowActive = vm::showActiveSessionHistory,
+            onShowArchived = vm::showArchivedSessionHistory,
+            onResume = { session ->
+                vm.closeSessionHistory()
+                vm.resumeChat(session)
+            },
+            onRename = vm::renameSessionHistoryEntry,
+            onArchive = vm::archiveSessionHistoryEntry,
+            onRestore = vm::restoreSessionHistoryEntry,
+            onDelete = vm::deleteSessionHistoryEntry,
+            onBack = vm::closeSessionHistory
+        )
         activeBot == null && activeGroup == null -> {
             RosterScreen(
                 bots = bots,
@@ -341,6 +366,7 @@ private fun AppRoot(
             sessions = sessions,
             onResume = vm::resumeChat,
             onNew = vm::startNewSession,
+            onHistory = vm::openSessionHistory,
             onBack = vm::closeChat
         )
         else -> ChatScreen(
@@ -357,6 +383,7 @@ private fun AppRoot(
             onSend = vm::send,
             onBack = vm::closeChat,
             onRoutines = vm::openRoutines,
+            onHistory = vm::openSessionHistory,
             currentModel = currentModel,
             currentProvider = currentProvider,
             onSwitchModel = { provider, model, confirmExpensive ->

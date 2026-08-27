@@ -14,9 +14,11 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withTimeout
 import okhttp3.Call
 import okhttp3.Callback
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
@@ -40,7 +42,9 @@ data class SessionInfo(
     val preview: String,
     val messageCount: Int,
     val startedAt: Long,
-    val lastActive: Long = 0
+    val lastActive: Long = 0,
+    val archived: Boolean = false,
+    val isActive: Boolean = false
 )
 
 /** Podsumowanie rozmów profilu dla karty na rosterze. */
@@ -509,6 +513,118 @@ open class GatewayClient(private val ok: OkHttpClient = OkHttpClient()) {
         }.filter { it.messageCount > 0 || it.preview.isNotBlank() }
             // szum: sesje cron/scheduler nie sa rozmowami uzytkownika
             .filter { !it.id.startsWith("cron_") && !it.preview.startsWith("[IMPORTANT") }
+    }
+
+    /**
+     * Metadata-only history list backed by the dashboard's profile-scoped REST
+     * endpoint. Preview/message content is intentionally neither searched nor
+     * retained by this history surface.
+     */
+    open suspend fun listStoredSessions(profile: String, archived: Boolean): List<SessionInfo> {
+        val cleanProfile = profile.trim()
+        require(cleanProfile.isNotEmpty()) { "Profile is required" }
+        val url = baseUrl.toHttpUrl().newBuilder()
+            .addPathSegment("api")
+            .addPathSegment("sessions")
+            .addQueryParameter("limit", "100")
+            .addQueryParameter("archived", if (archived) "only" else "exclude")
+            .addQueryParameter("order", "recent")
+            .addQueryParameter("exclude_sources", "tool,kanban")
+            .addQueryParameter("profile", cleanProfile)
+            .build()
+        val token = fetchToken()
+        val request = Request.Builder()
+            .url(url)
+            .get()
+            .apply { basicAuth?.let { header("Authorization", it) } }
+            .header("X-Hermes-Session-Token", token)
+            .header("User-Agent", "HermesBots/0.10")
+            .build()
+        return http.newCall(request).await().use { response ->
+            check(response.isSuccessful) { "HTTP ${response.code}" }
+            val rows = JSONObject(response.body!!.string()).optJSONArray("sessions")
+                ?: return@use emptyList()
+            (0 until rows.length()).mapNotNull { index ->
+                rows.optJSONObject(index)?.let { row ->
+                    val id = row.optString("id").trim()
+                    if (id.isEmpty()) return@let null
+                    SessionInfo(
+                        id = id,
+                        title = row.optString("title").ifBlank { "(bez tytułu)" },
+                        preview = "",
+                        messageCount = row.optInt("message_count", 0),
+                        startedAt = row.optLong("started_at", 0),
+                        lastActive = row.optLong("last_active", 0),
+                        archived = row.optBoolean("archived"),
+                        isActive = row.optBoolean("is_active")
+                    )
+                }
+            }
+        }
+    }
+
+    /**
+     * Applies an explicit user-requested history mutation to one durable session.
+     * The dashboard REST route owns persisted rename/archive state; the session
+     * token stays in the request header and is never part of the JSON payload.
+     */
+    open suspend fun updateStoredSession(
+        profile: String,
+        storedSessionId: String,
+        title: String? = null,
+        archived: Boolean? = null
+    ) {
+        val cleanProfile = profile.trim()
+        val cleanSessionId = storedSessionId.trim()
+        require(cleanProfile.isNotEmpty()) { "Profile is required" }
+        require(cleanSessionId.isNotEmpty()) { "Stored session id is required" }
+        require(title != null || archived != null) { "At least one history field is required" }
+
+        val body = JSONObject().put("profile", cleanProfile).apply {
+            if (title != null) put("title", title)
+            if (archived != null) put("archived", archived)
+        }.toString().toRequestBody("application/json".toMediaType())
+        val url = baseUrl.toHttpUrl().newBuilder()
+            .addPathSegment("api")
+            .addPathSegment("sessions")
+            .addPathSegment(cleanSessionId)
+            .build()
+        val token = fetchToken()
+        val request = Request.Builder()
+            .url(url)
+            .patch(body)
+            .apply { basicAuth?.let { header("Authorization", it) } }
+            .header("X-Hermes-Session-Token", token)
+            .header("User-Agent", "HermesBots/0.10")
+            .build()
+        http.newCall(request).await().use { response ->
+            check(response.isSuccessful) { "HTTP ${response.code}" }
+        }
+    }
+
+    /** Permanently deletes one explicitly selected stored session in its profile scope. */
+    open suspend fun deleteStoredSession(profile: String, storedSessionId: String) {
+        val cleanProfile = profile.trim()
+        val cleanSessionId = storedSessionId.trim()
+        require(cleanProfile.isNotEmpty()) { "Profile is required" }
+        require(cleanSessionId.isNotEmpty()) { "Stored session id is required" }
+        val url = baseUrl.toHttpUrl().newBuilder()
+            .addPathSegment("api")
+            .addPathSegment("sessions")
+            .addPathSegment(cleanSessionId)
+            .addQueryParameter("profile", cleanProfile)
+            .build()
+        val token = fetchToken()
+        val request = Request.Builder()
+            .url(url)
+            .delete()
+            .apply { basicAuth?.let { header("Authorization", it) } }
+            .header("X-Hermes-Session-Token", token)
+            .header("User-Agent", "HermesBots/0.10")
+            .build()
+        http.newCall(request).await().use { response ->
+            check(response.isSuccessful) { "HTTP ${response.code}" }
+        }
     }
 
     /** Podsumowanie aktywnosci profilu dla rosteru: liczba rozmów + najnowsza. */

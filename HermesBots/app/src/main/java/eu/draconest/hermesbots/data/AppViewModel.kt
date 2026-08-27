@@ -1551,6 +1551,9 @@ class AppViewModel(
         activeBot.value = null
         messages.value = emptyList()
         sessions.value = emptyList()
+        _viewSessionHistory.value = false
+        sessionHistoryEntries.value = emptyList()
+        sessionHistoryRequestEpoch += 1
         beginSessionTransition()
         thinking.value = false
         routines.value = emptyList()
@@ -1573,9 +1576,17 @@ class AppViewModel(
     val viewOutbox = _viewOutbox.asStateFlow()
     private val _viewHealth = MutableStateFlow(false)
     val viewHealth = _viewHealth.asStateFlow()
+    private val _viewSessionHistory = MutableStateFlow(false)
+    val viewSessionHistory = _viewSessionHistory.asStateFlow()
+    val sessionHistoryEntries = MutableStateFlow<List<SessionInfo>>(emptyList())
+    val sessionHistoryArchived = MutableStateFlow(false)
+    val sessionHistoryLoading = MutableStateFlow(false)
+    val sessionHistoryError = MutableStateFlow<String?>(null)
+    private var sessionHistoryRequestEpoch = 0
 
     fun openOutbox() {
         _viewHealth.value = false
+        _viewSessionHistory.value = false
         _viewOutbox.value = true
     }
 
@@ -1583,13 +1594,130 @@ class AppViewModel(
 
     fun openHealth() {
         _viewOutbox.value = false
+        _viewSessionHistory.value = false
         _viewHealth.value = true
     }
 
     fun closeHealth() { _viewHealth.value = false }
 
+    /** Opens metadata-only conversation history without changing the active chat identity. */
+    fun openSessionHistory(archived: Boolean = false) {
+        val bot = activeBot.value ?: return
+        _viewOutbox.value = false
+        _viewHealth.value = false
+        _viewRoutines.value = false
+        _viewSessionHistory.value = true
+        sessionHistoryError.value = null
+        sessionHistoryArchived.value = archived
+        refreshSessionHistory(bot, archived)
+    }
+
+    fun closeSessionHistory() {
+        _viewSessionHistory.value = false
+        sessionHistoryRequestEpoch += 1
+        sessionHistoryLoading.value = false
+    }
+
+    fun showArchivedSessionHistory() {
+        val bot = activeBot.value ?: return
+        if (!_viewSessionHistory.value) return
+        sessionHistoryArchived.value = true
+        refreshSessionHistory(bot, archived = true)
+    }
+
+    fun showActiveSessionHistory() {
+        val bot = activeBot.value ?: return
+        if (!_viewSessionHistory.value) return
+        sessionHistoryArchived.value = false
+        refreshSessionHistory(bot, archived = false)
+    }
+
+    fun archiveSessionHistoryEntry(entry: SessionInfo) {
+        val bot = activeBot.value ?: return
+        if (!_viewSessionHistory.value || sessionHistoryArchived.value || entry.isActive || entry.archived) return
+        if (sessionHistoryEntries.value.none { it.id == entry.id && !it.isActive && !it.archived }) return
+        sessionHistoryError.value = null
+        viewModelScope.launch {
+            try {
+                client.updateStoredSession(profile = bot.name, storedSessionId = entry.id, archived = true)
+            } catch (_: Exception) {
+                if (_viewSessionHistory.value && activeBot.value?.name == bot.name && !sessionHistoryArchived.value) {
+                    sessionHistoryError.value = "Nie udało się zarchiwizować rozmowy."
+                }
+                return@launch
+            }
+            refreshSessionHistory(bot, archived = false)
+        }
+    }
+
+    fun renameSessionHistoryEntry(entry: SessionInfo, rawTitle: String) {
+        val bot = activeBot.value ?: return
+        val title = rawTitle.trim()
+        if (title.isEmpty() || !_viewSessionHistory.value || entry.isActive) return
+        if (sessionHistoryEntries.value.none { it.id == entry.id && !it.isActive }) return
+        val archived = sessionHistoryArchived.value
+        viewModelScope.launch {
+            try {
+                client.updateStoredSession(profile = bot.name, storedSessionId = entry.id, title = title)
+            } catch (_: Exception) {
+                return@launch
+            }
+            refreshSessionHistory(bot, archived)
+        }
+    }
+
+    fun restoreSessionHistoryEntry(entry: SessionInfo) {
+        val bot = activeBot.value ?: return
+        if (!_viewSessionHistory.value || !sessionHistoryArchived.value || entry.isActive || !entry.archived) return
+        if (sessionHistoryEntries.value.none { it.id == entry.id && it.archived && !it.isActive }) return
+        viewModelScope.launch {
+            try {
+                client.updateStoredSession(profile = bot.name, storedSessionId = entry.id, archived = false)
+            } catch (_: Exception) {
+                return@launch
+            }
+            refreshSessionHistory(bot, archived = true)
+        }
+    }
+
+    fun deleteSessionHistoryEntry(entry: SessionInfo) {
+        val bot = activeBot.value ?: return
+        if (!_viewSessionHistory.value || entry.isActive) return
+        val archived = sessionHistoryArchived.value
+        if (sessionHistoryEntries.value.none { it.id == entry.id && !it.isActive && it.archived == archived }) return
+        viewModelScope.launch {
+            try {
+                client.deleteStoredSession(profile = bot.name, storedSessionId = entry.id)
+            } catch (_: Exception) {
+                return@launch
+            }
+            refreshSessionHistory(bot, archived)
+        }
+    }
+
+    private fun refreshSessionHistory(bot: BotInfo, archived: Boolean) {
+        val requestEpoch = ++sessionHistoryRequestEpoch
+        sessionHistoryLoading.value = true
+        viewModelScope.launch {
+            val entries = try {
+                client.listStoredSessions(bot.name, archived)
+            } catch (_: Exception) {
+                emptyList()
+            }
+            if (requestEpoch == sessionHistoryRequestEpoch &&
+                _viewSessionHistory.value &&
+                activeBot.value?.name == bot.name &&
+                sessionHistoryArchived.value == archived
+            ) {
+                sessionHistoryEntries.value = entries
+                sessionHistoryLoading.value = false
+            }
+        }
+    }
+
     fun openRoutines() {
         val bot = activeBot.value ?: return
+        _viewSessionHistory.value = false
         _viewRoutines.value = true
         viewModelScope.launch {
             try {
@@ -1714,6 +1842,7 @@ class AppViewModel(
     fun openGroup(name: String) {
         activeGroup.value = name
         _viewRoutines.value = false
+        _viewSessionHistory.value = false
         sessions.value = emptyList()
         groupLog.value = GroupChatEngine.room(name).log.toList()
     }

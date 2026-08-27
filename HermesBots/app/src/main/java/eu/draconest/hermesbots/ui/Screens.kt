@@ -340,6 +340,7 @@ fun ChatScreen(
     onSend: (String) -> Unit,
     onBack: () -> Unit,
     onRoutines: () -> Unit = {},
+    onHistory: () -> Unit = {},
     currentModel: String = "",
     currentProvider: String = "",
     onSwitchModel: suspend (
@@ -559,6 +560,7 @@ fun ChatScreen(
                     }
                 },
                 actions = {
+                    androidx.compose.material3.TextButton(onClick = onHistory) { Text("Historia") }
                     IconButton(onClick = onRoutines) {
                         Icon(painterResource(R.drawable.lucide_ic_calendar), contentDescription = "Routines")
                     }
