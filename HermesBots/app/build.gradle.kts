@@ -20,8 +20,8 @@ android {
         applicationId = "eu.draconest.hermesbots"
         minSdk = 26
         targetSdk = 34
-        versionCode = 29
-        versionName = "1.8.4"
+        versionCode = 31
+        versionName = "1.8.6"
     }
 
     signingConfigs {
@@ -75,7 +75,7 @@ dependencies {
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.activity:activity-compose:1.9.2")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.6")
-    implementation("androidx.navigation:navigation-compose:2.8.1")
+    implementation("androidx.navigation:navigation-compose:2.9.4")
 
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-tooling-preview")
@@ -90,4 +90,7 @@ dependencies {
     implementation("com.google.firebase:firebase-messaging-ktx:24.0.2")
 
     testImplementation("junit:junit:4.13.2")
+    testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
+    testImplementation("org.json:json:20240303")
+    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.8.1")
 }

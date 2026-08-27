@@ -33,4 +33,41 @@ class ModelSwitchProtocolTest {
             )
         )
     }
+
+    @Test
+    fun confirmationRequiredResponseIsNotTreatedAsApplied() {
+        assertEquals(
+            ModelSwitchResult.ConfirmationRequired("Ten model wymaga potwierdzenia."),
+            modelSwitchOutcome(
+                confirmationRequired = true,
+                confirmationMessage = "Ten model wymaga potwierdzenia.",
+                warning = ""
+            )
+        )
+    }
+
+    @Test
+    fun confirmedGatewayResponseIsApplied() {
+        assertEquals(
+            ModelSwitchResult.Applied,
+            modelSwitchOutcome(
+                confirmationRequired = false,
+                confirmationMessage = "",
+                warning = ""
+            )
+        )
+    }
+
+    @Test
+    fun deferredGatewayResponseIsNotTreatedAsApplied() {
+        assertEquals(
+            ModelSwitchResult.Deferred,
+            modelSwitchOutcome(
+                confirmationRequired = false,
+                confirmationMessage = "",
+                warning = "",
+                deferred = true
+            )
+        )
+    }
 }

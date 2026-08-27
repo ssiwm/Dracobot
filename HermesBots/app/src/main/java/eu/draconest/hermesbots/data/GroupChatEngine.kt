@@ -114,47 +114,50 @@ object GroupChatEngine {
         client: GatewayClient, group: String, member: BotInfo, prompt: String
     ): String? {
         val title = "Group: $group"
-        // ensure session: resume po tytule, inaczej create
-        var stored: String? = null
+        // session.list yields a durable key; every resume then produces an authoritative handle.
+        var requestedStoredSessionId: String? = null
         try {
             val listRes = client.rpcRaw("session.list", JSONObject().put("profile", member.name).put("title", title))
             val arr = listRes.optJSONArray("sessions")
-            if (arr != null && arr.length() > 0) stored = arr.optJSONObject(0)?.optString("id")
-        } catch (_: Exception) {}
-
-        var runtime: String? = null
-        try {
-            if (stored != null) {
-                val res = client.rpcRaw("session.resume", JSONObject()
-                    .put("session_id", stored).put("profile", member.name).put("omit_messages", true))
-                runtime = res.optString("session_id").ifBlank { null }
+            if (arr != null && arr.length() > 0) {
+                requestedStoredSessionId = arr.optJSONObject(0)?.optString("id")?.ifBlank { null }
             }
         } catch (_: Exception) {}
 
-        if (runtime == null) {
+        if (requestedStoredSessionId == null) {
             try {
                 val created = client.rpcRaw("session.create", JSONObject()
                     .put("profile", member.name).put("title", title).put("source", "android-app"))
-                runtime = created.optString("session_id").ifBlank { null }
-                stored = created.optString("stored_session_id").ifBlank { stored }
+                requestedStoredSessionId = created.optString("stored_session_id")
+                    .ifBlank { created.optString("session_id") }
+                    .ifBlank { null }
             } catch (_: Exception) { return null }
         }
 
-        // baseline liczby wiadomosci
-        var before = 0
-        try {
-            val pre = client.resumeSession(member.name, stored ?: runtime!!)
-            before = pre.second.size
-        } catch (_: Exception) {}
+        // Keep exactly the latest returned handle: runtime ids are never durable resume keys.
+        var active = try {
+            client.resumeSession(member.name, requestedStoredSessionId ?: return null)
+        } catch (_: Exception) {
+            return null
+        }
+        val before = active.messages.size
 
-        client.submitPrompt(runtime!!, prompt)
+        if (!client.submitPrompt(active.handle.runtimeSessionId, prompt)) return null
 
+        // Poll only after gateway ACK; each poll may continue parent -> successor identity.
         val deadline = System.currentTimeMillis() + TURN_TIMEOUT_MS
         while (System.currentTimeMillis() < deadline) {
             delay(TURN_POLL_MS)
             val state = try {
-                client.resumeSessionState(member.name, stored ?: runtime)
+                client.resumeSessionState(member.name, active.handle.storedSessionId)
             } catch (_: Exception) { continue }
+            active = ResumedSession(
+                handle = state.handle,
+                messages = active.messages,
+                model = active.model,
+                provider = active.provider,
+                isRunning = state.running
+            )
             val done = !state.inflight && !state.running
             if (state.lastAssistantText != null && state.messageCount > before && done) {
                 return state.lastAssistantText
@@ -163,5 +166,11 @@ object GroupChatEngine {
         return null // timeout = pass
     }
 
-    data class TurnState(val messageCount: Int, val lastAssistantText: String?, val inflight: Boolean, val running: Boolean)
+    data class TurnState(
+        val handle: SessionHandle,
+        val messageCount: Int,
+        val lastAssistantText: String?,
+        val inflight: Boolean,
+        val running: Boolean
+    )
 }

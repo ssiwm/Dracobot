@@ -22,6 +22,21 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import eu.draconest.hermesbots.data.ModelProviderOption
+
+/** A model is active only when both its provider and raw ID match the session. */
+internal fun isCurrentModelSelection(
+    provider: String,
+    model: String,
+    currentProvider: String,
+    currentModel: String,
+    providerAliases: List<String> = emptyList()
+): Boolean {
+    val selectedProvider = currentProvider.trim()
+    return model == currentModel && selectedProvider.isNotEmpty() &&
+        (provider.trim().equals(selectedProvider, ignoreCase = true) ||
+            providerAliases.any { it.trim().equals(selectedProvider, ignoreCase = true) })
+}
 
 /**
  * Picker modelu AI: providerzy + ich modele z model.options.
@@ -33,9 +48,9 @@ fun ModelPickerContent(
     currentModel: String,
     currentProvider: String,
     onPick: (provider: String, model: String) -> Unit,
-    loadOptions: suspend () -> List<Pair<String, List<String>>>
+    loadOptions: suspend () -> List<ModelProviderOption>
 ) {
-    var options by remember { mutableStateOf<List<Pair<String, List<String>>>?>(null) }
+    var options by remember { mutableStateOf<List<ModelProviderOption>?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(Unit) {
@@ -73,7 +88,9 @@ fun ModelPickerContent(
                 modifier = Modifier.padding(20.dp)
             )
             else -> LazyColumn {
-                options!!.forEach { (providerSlug, models) ->
+                options!!.forEach { option ->
+                    val providerSlug = option.slug
+                    val models = option.models
                     item(key = "hdr-$providerSlug") {
                         Text(
                             providerSlug.uppercase(),
@@ -85,7 +102,13 @@ fun ModelPickerContent(
                     }
                     items(models.size, key = { i -> "$providerSlug-$i" }) { idx ->
                         val model = models[idx]
-                        val isCurrent = model == currentModel
+                        val isCurrent = isCurrentModelSelection(
+                            provider = providerSlug,
+                            model = model,
+                            currentProvider = currentProvider,
+                            currentModel = currentModel,
+                            providerAliases = option.aliases
+                        )
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
                             modifier = Modifier

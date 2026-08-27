@@ -7,7 +7,6 @@
     <application
         android:label="Hermes Bots"
         android:theme="@style/Theme.HermesBots"
-        android:usesCleartextTraffic="true"
         android:supportsRtl="true">
 
         <activity

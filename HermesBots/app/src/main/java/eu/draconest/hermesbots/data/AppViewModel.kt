@@ -7,6 +7,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import org.json.JSONObject
 
 data class ChatMessage(
@@ -23,9 +25,306 @@ data class ChatMessage(
     }
 }
 
-class AppViewModel : ViewModel() {
-    private val client = GatewayClient()
+/** A response may update UI state only if it belongs to the still-active transition. */
+internal fun shouldApplySessionUpdate(expectedGeneration: Int, currentGeneration: Int): Boolean =
+    expectedGeneration == currentGeneration
+
+/** A reconnect-resume response is valid only for its original active session identities and state. */
+internal fun shouldApplyReconnectResult(
+    expectedRuntimeSessionId: String,
+    activeRuntimeSessionId: String?,
+    expectedStoredSessionId: String,
+    activeStoredSessionId: String?,
+    expectedGeneration: Int,
+    currentGeneration: Int,
+    expectedRevision: Long,
+    currentRevision: Long
+): Boolean = expectedRuntimeSessionId == activeRuntimeSessionId &&
+    expectedStoredSessionId == activeStoredSessionId &&
+    shouldApplySessionUpdate(expectedGeneration, currentGeneration) &&
+    expectedRevision == currentRevision
+
+/** Sending a prompt and choosing its next-turn model intentionally have different busy rules. */
+internal data class ChatActionAvailability(
+    val canSubmitPrompt: Boolean,
+    val canSwitchModel: Boolean
+)
+
+internal fun chatActionAvailability(
+    thinking: Boolean,
+    streaming: Boolean,
+    modelSwitchInFlight: Boolean,
+    awaitingDeferredTurnBoundary: Boolean,
+    awaitingDeferredModelResolution: Boolean
+): ChatActionAvailability {
+    val modelTransitionBusy = modelSwitchInFlight ||
+        awaitingDeferredTurnBoundary || awaitingDeferredModelResolution
+    return ChatActionAvailability(
+        canSubmitPrompt = !thinking && !streaming && !modelTransitionBusy,
+        // The gateway queues config.set while a turn runs, so streaming alone must not hide the picker.
+        canSwitchModel = !modelTransitionBusy
+    )
+}
+
+/** Do not let a delayed model.options response overwrite newer same-session state. */
+internal fun shouldApplyModelOptionsResult(
+    expectedRuntimeSessionId: String,
+    activeRuntimeSessionId: String?,
+    expectedGeneration: Int,
+    currentGeneration: Int,
+    expectedModelStateRevision: Long,
+    currentModelStateRevision: Long
+): Boolean = expectedRuntimeSessionId == activeRuntimeSessionId &&
+    shouldApplySessionUpdate(expectedGeneration, currentGeneration) &&
+    expectedModelStateRevision == currentModelStateRevision
+
+/** A config.set response is valid only for the exact same session, state revision, and request owner. */
+internal fun shouldApplyModelSwitchResult(
+    expectedRuntimeSessionId: String,
+    activeRuntimeSessionId: String?,
+    expectedGeneration: Int,
+    currentGeneration: Int,
+    expectedModelStateRevision: Long,
+    currentModelStateRevision: Long,
+    expectedRequestEpoch: Long,
+    currentRequestEpoch: Long
+): Boolean = shouldApplyModelOptionsResult(
+    expectedRuntimeSessionId = expectedRuntimeSessionId,
+    activeRuntimeSessionId = activeRuntimeSessionId,
+    expectedGeneration = expectedGeneration,
+    currentGeneration = currentGeneration,
+    expectedModelStateRevision = expectedModelStateRevision,
+    currentModelStateRevision = currentModelStateRevision
+) && expectedRequestEpoch == currentRequestEpoch
+
+/** A model selection accepted by config.set but queued until a later prompt starts. */
+internal data class DeferredModelSwitch(
+    val runtimeSessionId: String,
+    val provider: String,
+    val model: String,
+    val confirmExpensiveModel: Boolean,
+    /** True until the server turn that caused `deferred:true` has completed. */
+    val awaitingCurrentTurnCompletion: Boolean,
+    /** Becomes true only when this client submits a prompt after that boundary. */
+    val nextTurnPromptSubmitted: Boolean = false
+)
+
+/** Build queued-switch state without trusting the local `thinking` flag. */
+internal fun deferredSwitchForGatewayResponse(
+    runtimeSessionId: String,
+    provider: String,
+    model: String,
+    confirmExpensiveModel: Boolean,
+    completionEpochAtRequest: Long,
+    currentCompletionEpoch: Long
+): DeferredModelSwitch = DeferredModelSwitch(
+    runtimeSessionId = runtimeSessionId,
+    provider = provider,
+    model = model,
+    confirmExpensiveModel = confirmExpensiveModel,
+    awaitingCurrentTurnCompletion = currentCompletionEpoch == completionEpochAtRequest
+)
+
+/** Consume only the known original turn boundary; an unrelated session leaves state intact. */
+internal fun markDeferredSwitchCompletion(
+    pending: DeferredModelSwitch,
+    activeRuntimeSessionId: String?
+): DeferredModelSwitch = if (
+    pending.runtimeSessionId == activeRuntimeSessionId && pending.awaitingCurrentTurnCompletion
+) {
+    pending.copy(awaitingCurrentTurnCompletion = false)
+} else {
+    pending
+}
+
+/** Mark the first prompt submitted after the original deferred turn has ended. */
+internal fun markDeferredSwitchPromptSubmitted(
+    pending: DeferredModelSwitch,
+    activeRuntimeSessionId: String?
+): DeferredModelSwitch = if (
+    pending.runtimeSessionId == activeRuntimeSessionId &&
+    !pending.awaitingCurrentTurnCompletion &&
+    !pending.nextTurnPromptSubmitted
+) {
+    pending.copy(nextTurnPromptSubmitted = true)
+} else {
+    pending
+}
+
+/** Rebind a deferred request after reconnect; an idle authoritative resume supplies the missing boundary. */
+internal fun reconcileDeferredBoundaryAfterResume(
+    pending: DeferredModelSwitch,
+    activeRuntimeSessionId: String,
+    serverRunning: Boolean
+): DeferredModelSwitch {
+    val rebound = pending.copy(runtimeSessionId = activeRuntimeSessionId)
+    return if (serverRunning) rebound else markDeferredSwitchCompletion(rebound, activeRuntimeSessionId)
+}
+
+internal enum class DeferredResumeReconciliation { Waiting, Applied, Failed }
+
+/** Resolve a deferred next turn after reconnect only from the server's authoritative idle state. */
+internal fun deferredResumeReconciliation(
+    pending: DeferredModelSwitch,
+    serverRunning: Boolean,
+    actualProvider: String,
+    actualModel: String
+): DeferredResumeReconciliation {
+    if (serverRunning || pending.awaitingCurrentTurnCompletion || !pending.nextTurnPromptSubmitted) {
+        return DeferredResumeReconciliation.Waiting
+    }
+    return if (pending.provider == actualProvider && pending.model == actualModel) {
+        DeferredResumeReconciliation.Applied
+    } else {
+        DeferredResumeReconciliation.Failed
+    }
+}
+
+/** A model.options refresh is safe only after that client-submitted next turn completes. */
+internal fun shouldReconcileDeferredSwitch(
+    pending: DeferredModelSwitch,
+    activeRuntimeSessionId: String?
+): Boolean = pending.runtimeSessionId == activeRuntimeSessionId &&
+    !pending.awaitingCurrentTurnCompletion && pending.nextTurnPromptSubmitted
+
+/** Gateway error events do not carry a typed confirmation discriminator, so never retry from text alone. */
+internal enum class DeferredErrorAction { Ignore, ReconcileAuthoritatively }
+
+internal fun deferredErrorAction(
+    pending: DeferredModelSwitch?,
+    activeRuntimeSessionId: String?
+): DeferredErrorAction = if (
+    pending != null && pending.runtimeSessionId == activeRuntimeSessionId &&
+    (pending.awaitingCurrentTurnCompletion || shouldReconcileDeferredSwitch(pending, activeRuntimeSessionId))
+) {
+    DeferredErrorAction.ReconcileAuthoritatively
+} else {
+    DeferredErrorAction.Ignore
+}
+
+/** Whether a persisted outbox item is safe to submit automatically. */
+internal enum class QueuedPromptDeliveryState { Pending, Rejected, Indeterminate }
+
+/** An offline prompt is bound to the durable session key, never whichever chat becomes active later. */
+internal data class QueuedPrompt(
+    val id: String = java.util.UUID.randomUUID().toString(),
+    val storedSessionId: String,
+    val text: String,
+    val deliveryState: QueuedPromptDeliveryState = QueuedPromptDeliveryState.Pending
+)
+
+internal fun canFlushSessionOutbox(
+    awaitingDeferredTurnBoundary: Boolean,
+    awaitingDeferredModelResolution: Boolean
+): Boolean = !awaitingDeferredTurnBoundary && !awaitingDeferredModelResolution
+
+/**
+ * FIFO prompts scoped to a durable session. A write to a WebSocket is not an ACK:
+ * callers must acknowledge the exact entry only after gateway RPC acceptance.
+ */
+internal class SessionOutbox(initialEntries: List<QueuedPrompt> = emptyList()) {
+    private val entries = initialEntries.toMutableList()
+
+    val size: Int
+        @Synchronized get() = entries.size
+
+    @Synchronized
+    fun snapshot(): List<QueuedPrompt> = entries.toList()
+
+    @Synchronized
+    fun restore(snapshot: List<QueuedPrompt>) {
+        entries.clear()
+        entries += snapshot
+    }
+
+    @Synchronized
+    fun enqueue(storedSessionId: String, text: String): QueuedPrompt {
+        val durableId = storedSessionId.trim()
+        require(durableId.isNotEmpty()) { "Outbox requires a durable session key" }
+        return QueuedPrompt(storedSessionId = durableId, text = text).also { entries += it }
+    }
+
+    /** First entry for this durable session regardless of whether it can be auto-sent. */
+    @Synchronized
+    fun headFor(storedSessionId: String): QueuedPrompt? =
+        entries.firstOrNull { it.storedSessionId == storedSessionId.trim() }
+
+    /** A direct submit is permitted only for the oldest entry in this durable-session FIFO. */
+    @Synchronized
+    fun isHead(entry: QueuedPrompt): Boolean =
+        entries.firstOrNull { it.storedSessionId == entry.storedSessionId }?.id == entry.id
+
+    /**
+     * Returns the oldest automatically-sendable prompt for this exact durable session.
+     * A rejected or ambiguous oldest item deliberately blocks later entries to preserve FIFO.
+     */
+    @Synchronized
+    fun nextFor(storedSessionId: String): QueuedPrompt? =
+        headFor(storedSessionId)?.takeIf { it.deliveryState == QueuedPromptDeliveryState.Pending }
+
+    /** Removes exactly the prompt whose delivery was acknowledged by the gateway. */
+    @Synchronized
+    fun acknowledge(entry: QueuedPrompt): Boolean = entries.removeAll { it.id == entry.id }
+
+    /** Keeps a known-rejected prompt for explicit user resolution; never silently replay it. */
+    @Synchronized
+    fun reject(entry: QueuedPrompt): Boolean = updateDeliveryState(
+        entry,
+        QueuedPromptDeliveryState.Rejected
+    )
+
+    /** A sent frame without an ACK may have reached the gateway, so replay would risk duplication. */
+    @Synchronized
+    fun markIndeterminate(entry: QueuedPrompt): Boolean = updateDeliveryState(
+        entry,
+        QueuedPromptDeliveryState.Indeterminate
+    )
+
+    private fun updateDeliveryState(entry: QueuedPrompt, state: QueuedPromptDeliveryState): Boolean {
+        val index = entries.indexOfFirst { it.id == entry.id }
+        if (index < 0) return false
+        entries[index] = entries[index].copy(deliveryState = state)
+        return true
+    }
+
+    /**
+     * session.resume may resolve a compressed parent session to a successor.
+     * Rebinding occurs only after that authoritative response, preserving other chats.
+     */
+    @Synchronized
+    fun rebindStoredSession(previousStoredSessionId: String, resumedStoredSessionId: String): Int {
+        val previous = previousStoredSessionId.trim()
+        val resumed = resumedStoredSessionId.trim()
+        if (previous.isEmpty() || resumed.isEmpty() || previous == resumed) return 0
+        var moved = 0
+        entries.replaceAll { entry ->
+            if (entry.storedSessionId == previous) {
+                moved += 1
+                entry.copy(storedSessionId = resumed)
+            } else {
+                entry
+            }
+        }
+        return moved
+    }
+}
+
+private const val VIEW_MODEL_MODEL_SWITCH_TIMEOUT_MS = 12_000L
+
+class AppViewModel(
+    private val client: GatewayClient = GatewayClient(),
+    private val modelSwitchTimeoutMs: Long = VIEW_MODEL_MODEL_SWITCH_TIMEOUT_MS
+) : ViewModel() {
+    init {
+        require(modelSwitchTimeoutMs > 0) { "Model switch timeout must be positive" }
+    }
     lateinit var store: AppStore
+
+    /** Must be called before connection work so persisted outbox entries survive process recreation. */
+    fun initializeStore(appStore: AppStore) {
+        store = appStore
+        outbox.restore(appStore.queuedPrompts)
+    }
 
     val connected = MutableStateFlow(false)
     val connecting = MutableStateFlow(false)
@@ -50,15 +349,128 @@ class AppViewModel : ViewModel() {
     val currentProvider get() = client.currentProvider
 
     /** Zmienia model bieżącej rozmowy w zakresie tej sesji. */
-    suspend fun switchModel(provider: String, model: String): String? {
-        val sid = sessionId ?: return "Brak aktywnej rozmowy"
-        return client.setSessionModel(sid, provider, model)
+    suspend fun switchModel(
+        provider: String,
+        model: String,
+        confirmExpensiveModel: Boolean = false
+    ): ModelSwitchResult {
+        val sid = sessionId ?: return ModelSwitchResult.Failure("Brak aktywnej rozmowy")
+        val generation = sessionGeneration
+        val expectedModelStateRevision = modelStateRevision
+        val requestEpoch = ++modelSwitchRequestEpoch
+        val completionEpochAtRequest = completedTurnEpoch
+        modelSwitchInFlight.value = true
+        try {
+            val outcome = try {
+                kotlinx.coroutines.withTimeout(modelSwitchTimeoutMs) {
+                    client.setSessionModel(sid, provider, model, confirmExpensiveModel)
+                }
+            } catch (_: kotlinx.coroutines.TimeoutCancellationException) {
+                ModelSwitchResult.TimedOut
+            }
+            if (!shouldApplyModelSwitchResult(
+                    expectedRuntimeSessionId = sid,
+                    activeRuntimeSessionId = sessionId,
+                    expectedGeneration = generation,
+                    currentGeneration = sessionGeneration,
+                    expectedModelStateRevision = expectedModelStateRevision,
+                    currentModelStateRevision = modelStateRevision,
+                    expectedRequestEpoch = requestEpoch,
+                    currentRequestEpoch = modelSwitchRequestEpoch
+                )
+            ) {
+                return ModelSwitchResult.Failure("Zmiana modelu została zastąpiona nowszym stanem sesji.")
+            }
+            when (outcome) {
+                ModelSwitchResult.Applied -> {
+                    setDeferredModelSwitch(null)
+                    syncCurrentChatModel(model.trim(), provider.trim())
+                }
+                ModelSwitchResult.Deferred -> {
+                    setDeferredModelSwitch(
+                        deferredSwitchForGatewayResponse(
+                            runtimeSessionId = sid,
+                            provider = provider.trim(),
+                            model = model.trim(),
+                            confirmExpensiveModel = confirmExpensiveModel,
+                            completionEpochAtRequest = completionEpochAtRequest,
+                            currentCompletionEpoch = completedTurnEpoch
+                        )
+                    )
+                    markChatStateMutation()
+                }
+                ModelSwitchResult.TimedOut -> {
+                    // The gateway may have applied config.set after our deadline; read, never retry.
+                    reconcileTimedOutModelSwitch(
+                        runtimeSessionId = sid,
+                        generation = generation,
+                        expectedModelStateRevision = expectedModelStateRevision,
+                        requestEpoch = requestEpoch
+                    )
+                }
+                else -> setDeferredModelSwitch(null)
+            }
+            return outcome
+        } finally {
+            if (modelSwitchRequestEpoch == requestEpoch) {
+                modelSwitchInFlight.value = false
+            }
+        }
     }
 
-    /** Lista provider/modeli dla aktywnej sesji. */
-    suspend fun loadModelOptions(): List<Pair<String, List<String>>> {
+    /** A timed-out config.set is ambiguous: query current state once, guarded, and never resubmit it. */
+    private fun reconcileTimedOutModelSwitch(
+        runtimeSessionId: String,
+        generation: Int,
+        expectedModelStateRevision: Long,
+        requestEpoch: Long
+    ) {
+        viewModelScope.launch {
+            val payload = try {
+                kotlinx.coroutines.withTimeout(8_000) {
+                    client.modelOptions(runtimeSessionId)
+                }
+            } catch (_: kotlinx.coroutines.TimeoutCancellationException) {
+                return@launch
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                return@launch
+            }
+            if (shouldApplyModelSwitchResult(
+                    expectedRuntimeSessionId = runtimeSessionId,
+                    activeRuntimeSessionId = sessionId,
+                    expectedGeneration = generation,
+                    currentGeneration = sessionGeneration,
+                    expectedModelStateRevision = expectedModelStateRevision,
+                    currentModelStateRevision = modelStateRevision,
+                    expectedRequestEpoch = requestEpoch,
+                    currentRequestEpoch = modelSwitchRequestEpoch
+                )
+            ) {
+                syncCurrentChatModel(payload.model, payload.provider)
+            }
+        }
+    }
+
+    /** Lista provider/modeli dla aktywnej sesji oraz synchronizacja jej autorytatywnej tożsamości. */
+    suspend fun loadModelOptions(): List<ModelProviderOption> {
         val sid = sessionId ?: return emptyList()
-        return client.modelOptions(sid)
+        val generation = sessionGeneration
+        val expectedModelStateRevision = modelStateRevision
+        val payload = client.modelOptions(sid)
+        if (shouldApplyModelOptionsResult(
+                expectedRuntimeSessionId = sid,
+                activeRuntimeSessionId = sessionId,
+                expectedGeneration = generation,
+                currentGeneration = sessionGeneration,
+                expectedModelStateRevision = expectedModelStateRevision,
+                currentModelStateRevision = modelStateRevision
+            )
+        ) {
+            syncCurrentChatModel(payload.model, payload.provider)
+        }
+        return payload.providers
     }
 
     // ---- Załączniki ----
@@ -91,6 +503,7 @@ class AppViewModel : ViewModel() {
                 if (result.ok) {
                     attachments.value = attachments.value + AttachedItem(name, result.message)
                     messages.value += ChatMessage(ChatMessage.nextId(), fromUser = false, text = "📎 ${result.message}")
+                    markChatStateMutation()
                     _attachError.value = null
                 } else {
                     _attachError.value = result.message
@@ -140,6 +553,7 @@ class AppViewModel : ViewModel() {
                 text = "🎨 Wygenerowano: „${prompt.trim()}”",
                 imageData = dataUrl
             )
+            markChatStateMutation()
             return null
         } catch (e: Exception) {
             return e.message ?: "Błąd generowania"
@@ -149,7 +563,10 @@ class AppViewModel : ViewModel() {
     }
     /** Czy regeneracja jest mozliwa: jest poprzednia wiadomosc usera i bot nie mysli. */
     fun canRegenerate(): Boolean =
-       !thinking.value && messages.value.any { it.fromUser } &&
+       !thinking.value && messages.value.lastOrNull()?.streaming != true &&
+           !modelSwitchInFlight.value && !awaitingDeferredTurnBoundary.value &&
+           !awaitingDeferredModelResolution.value &&
+           messages.value.any { it.fromUser } &&
            messages.value.lastOrNull()?.fromUser == false
 
     /**
@@ -165,10 +582,55 @@ class AppViewModel : ViewModel() {
        thinkingHasContent.value = false
        thinkingOpen.value = true
        val sid = sessionId ?: return
-       val sent = client.submitPrompt(sid, "Powtórz poprzednie zadanie, odpowiedz inaczej/lepiej. Zadanie: $lastUser")
-       if (sent) {
-           thinking.value = true
-           messages.value += ChatMessage(ChatMessage.nextId(), fromUser = true, text = lastUser)
+       val durableSessionId = storedSessionId ?: return
+       val generation = sessionGeneration
+       val regenerationPrompt = "Powtórz poprzednie zadanie, odpowiedz inaczej/lepiej. Zadanie: $lastUser"
+       val entry = outbox.enqueue(durableSessionId, regenerationPrompt)
+       persistOutbox()
+       thinking.value = true
+       viewModelScope.launch {
+           outboxFlushMutex.withLock {
+               if (deferBehindEarlierOutboxEntry(entry)) return@withLock
+               when (val result = client.submitPromptResult(sid, entry.text)) {
+                   is PromptSubmissionResult.Accepted -> {
+                       outbox.acknowledge(entry)
+                       persistOutbox()
+                       if (isCurrentPromptScope(sid, durableSessionId, generation)) {
+                           notePromptSubmitted()
+                           messages.value += ChatMessage(ChatMessage.nextId(), fromUser = true, text = lastUser)
+                           markChatStateMutation()
+                       }
+                   }
+                   PromptSubmissionResult.NotSent -> {
+                       if (isCurrentPromptScope(sid, durableSessionId, generation)) {
+                           thinking.value = false
+                           appendPromptDeliveryNotice("Wiadomość oczekuje na ponowne połączenie.")
+                       }
+                       offline.value = true
+                       quietReconnectLoop()
+                   }
+                   is PromptSubmissionResult.Rejected -> {
+                       outbox.reject(entry)
+                       persistOutbox()
+                       if (isCurrentPromptScope(sid, durableSessionId, generation)) {
+                           thinking.value = false
+                           appendPromptDeliveryNotice(result.message)
+                       }
+                   }
+                   PromptSubmissionResult.Indeterminate -> {
+                       outbox.markIndeterminate(entry)
+                       persistOutbox()
+                       if (isCurrentPromptScope(sid, durableSessionId, generation)) {
+                           thinking.value = false
+                           appendPromptDeliveryNotice(
+                               "Nie można potwierdzić wysłania. Nie wyślę go ponownie automatycznie, aby uniknąć duplikatu."
+                           )
+                       }
+                       offline.value = true
+                       quietReconnectLoop()
+                   }
+               }
+           }
        }
     }
 
@@ -176,11 +638,182 @@ class AppViewModel : ViewModel() {
     /** "offline" = zalogowani, ale WS padl (apka w tle itp.) */
     val offline = MutableStateFlow(false)
 
+    /** Runtime id routes WS RPC/events and is replaced by every session.resume. */
     private var sessionId: String? = null
+    /** Durable key is the only identifier persisted and accepted by session.resume. */
+    private var storedSessionId: String? = null
+    private var sessionGeneration = 0
+    /** Bumps for every visible/authoritative chat mutation; reconnect snapshots must not overwrite newer state. */
+    private var chatStateRevision = 0L
+    /** Bumps for every model/provider write; delayed model.options must not overwrite session.info. */
+    private var modelStateRevision = 0L
+    /** Monotonic ownership token for config.set requests in this ViewModel. */
+    private var modelSwitchRequestEpoch = 0L
+    /** Monotonic counter of message.complete events for the current process. */
+    private var completedTurnEpoch = 0L
+    val modelSwitchInFlight = MutableStateFlow(false)
+    val awaitingDeferredTurnBoundary = MutableStateFlow(false)
+    /** Keeps a second prompt from racing the authoritative post-turn reconciliation. */
+    val awaitingDeferredModelResolution = MutableStateFlow(false)
+    private var deferredModelSwitch: DeferredModelSwitch? = null
+
+    private fun setDeferredModelSwitch(pending: DeferredModelSwitch?) {
+        deferredModelSwitch = pending
+        awaitingDeferredTurnBoundary.value = pending?.awaitingCurrentTurnCompletion == true
+        awaitingDeferredModelResolution.value = pending?.nextTurnPromptSubmitted == true
+    }
+
+    private fun notePromptSubmitted() {
+        val sid = sessionId ?: return
+        val pending = deferredModelSwitch ?: return
+        val advanced = markDeferredSwitchPromptSubmitted(pending, sid)
+        if (advanced != pending) setDeferredModelSwitch(advanced)
+    }
+
+    /** Never apply a delayed prompt acknowledgement to a chat that has since changed identity. */
+    private fun isCurrentPromptScope(
+        expectedRuntimeSessionId: String,
+        expectedStoredSessionId: String,
+        expectedGeneration: Int
+    ): Boolean = sessionId == expectedRuntimeSessionId &&
+        storedSessionId == expectedStoredSessionId &&
+        sessionGeneration == expectedGeneration
+
+    private fun appendPromptDeliveryNotice(message: String) {
+        messages.value += ChatMessage(ChatMessage.nextId(), fromUser = false, text = "⚠️ $message")
+        markChatStateMutation()
+    }
+
+    private fun markChatStateMutation() {
+        chatStateRevision += 1
+    }
+
+    private fun syncCurrentChatModel(model: String, provider: String) {
+        client.syncCurrentSessionModel(model, provider)
+        modelStateRevision += 1
+        markChatStateMutation()
+    }
+
+    private fun clearCurrentChatModel() {
+        client.clearCurrentSessionModel()
+        modelStateRevision += 1
+        markChatStateMutation()
+    }
+
+    /** Invalidate every in-flight session request before opening/resuming another chat. */
+    private fun beginSessionTransition(): Int {
+        sessionGeneration += 1
+        modelSwitchRequestEpoch += 1
+        modelSwitchInFlight.value = false
+        sessionId = null
+        storedSessionId = null
+        setDeferredModelSwitch(null)
+        clearCurrentChatModel()
+        return sessionGeneration
+    }
+
+    private fun activateSession(
+        generation: Int,
+        handle: SessionHandle,
+        model: String,
+        provider: String,
+        requestedStoredSessionId: String? = null
+    ): Boolean {
+        if (!shouldApplySessionUpdate(generation, sessionGeneration)) return false
+        sessionId = handle.runtimeSessionId
+        storedSessionId = handle.storedSessionId
+        requestedStoredSessionId?.let { previousStoredSessionId ->
+            rebindOutboxAfterAuthoritativeResume(previousStoredSessionId, handle.storedSessionId)
+        }
+        if (::store.isInitialized) store.lastSessionId = handle.storedSessionId
+        syncCurrentChatModel(model, provider)
+        return true
+    }
+
+    /** Reconcile only after the client submitted the post-boundary turn and it reached a terminal event. */
+    private fun reconcileDeferredModelSwitchAfterTerminalEvent() {
+        val pending = deferredModelSwitch ?: return
+        val sid = sessionId ?: return
+        if (pending.runtimeSessionId != sid || pending.awaitingCurrentTurnCompletion) return
+        if (!shouldReconcileDeferredSwitch(pending, sid)) return
+        val generation = sessionGeneration
+        val expectedModelStateRevision = modelStateRevision
+        viewModelScope.launch {
+            try {
+                val payload = client.modelOptions(sid)
+                if (!shouldApplyModelOptionsResult(
+                        expectedRuntimeSessionId = sid,
+                        activeRuntimeSessionId = sessionId,
+                        expectedGeneration = generation,
+                        currentGeneration = sessionGeneration,
+                        expectedModelStateRevision = expectedModelStateRevision,
+                        currentModelStateRevision = modelStateRevision
+                    ) || deferredModelSwitch != pending
+                ) return@launch
+                setDeferredModelSwitch(null)
+                syncCurrentChatModel(payload.model, payload.provider)
+                if (payload.model != pending.model || payload.provider != pending.provider) {
+                    messages.value += ChatMessage(
+                        ChatMessage.nextId(),
+                        fromUser = false,
+                        text = "⚠️ Odroczona zmiana modelu nie została zastosowana przez gateway."
+                    )
+                    markChatStateMutation()
+                }
+                flushOutbox()
+            } catch (_: Exception) {
+                if (shouldApplyModelOptionsResult(
+                        expectedRuntimeSessionId = sid,
+                        activeRuntimeSessionId = sessionId,
+                        expectedGeneration = generation,
+                        currentGeneration = sessionGeneration,
+                        expectedModelStateRevision = expectedModelStateRevision,
+                        currentModelStateRevision = modelStateRevision
+                    ) && deferredModelSwitch == pending
+                ) {
+                    setDeferredModelSwitch(null)
+                    messages.value += ChatMessage(
+                        ChatMessage.nextId(),
+                        fromUser = false,
+                        text = "⚠️ Nie udało się potwierdzić odroczonej zmiany modelu. Wybierz model ponownie."
+                    )
+                    markChatStateMutation()
+                    flushOutbox()
+                }
+            }
+        }
+    }
+
+    /** A bare gateway error has no reliable terminal discriminator; resume decides its boundary. */
+    private fun reconcileDeferredErrorThroughAuthoritativeResume() {
+        val pending = deferredModelSwitch ?: return
+        val sid = sessionId ?: return
+        if (pending.runtimeSessionId != sid) return
+        viewModelScope.launch {
+            refreshCurrentChatAfterReconnect()
+            flushOutbox()
+        }
+    }
+
     private var eventsJob: Job? = null
     private var linkWatchJob: Job? = null
     private var reconnectJob: Job? = null
-    private val outbox = ArrayDeque<String>() // niewyslane wiadomosci czekajace na link
+    private val outbox = SessionOutbox() // durable-session-scoped prompts waiting for a usable link
+    private val outboxFlushMutex = Mutex()
+
+    private fun persistOutbox() {
+        if (::store.isInitialized) store.queuedPrompts = outbox.snapshot()
+    }
+
+    /** Move only the exact durable key that session.resume authoritatively resolved to a successor. */
+    private fun rebindOutboxAfterAuthoritativeResume(
+        requestedStoredSessionId: String,
+        resumedStoredSessionId: String
+    ) {
+        if (outbox.rebindStoredSession(requestedStoredSessionId, resumedStoredSessionId) > 0) {
+            persistOutbox()
+        }
+    }
 
     /** Obserwuje stan gniazda WS; przy zerwaniu uruchamia cichy reconnect. */
     fun observeLink() {
@@ -222,15 +855,73 @@ class AppViewModel : ViewModel() {
      * i zdjmie zawieszony status "mysli", jesli tura faktycznie sie skonczyla. */
     private suspend fun refreshCurrentChatAfterReconnect() {
         val bot = activeBot.value ?: return
-        val stored = store.lastSessionId
-        val target = sessionId ?: stored.takeIf { it.isNotBlank() } ?: return
+        val activeRuntimeSessionId = sessionId ?: return
+        val storedSessionFallback = if (::store.isInitialized) {
+            store.lastSessionId.takeIf { it.isNotBlank() }
+        } else {
+            null
+        }
+        val activeStoredSessionId = storedSessionId ?: storedSessionFallback ?: return
+        val reconnectGeneration = sessionGeneration
+        val reconnectRevision = chatStateRevision
         try {
-            val (_, history) = kotlinx.coroutines.withTimeout(15_000) {
-                client.resumeSession(bot.name, target)
+            val resumed = kotlinx.coroutines.withTimeout(15_000) {
+                client.resumeSession(bot.name, activeStoredSessionId)
             }
-            val restored = history.map { (fromUser, text) ->
+            if (!shouldApplyReconnectResult(
+                expectedRuntimeSessionId = activeRuntimeSessionId,
+                activeRuntimeSessionId = sessionId,
+                expectedStoredSessionId = activeStoredSessionId,
+                activeStoredSessionId = storedSessionId ?: storedSessionFallback,
+                expectedGeneration = reconnectGeneration,
+                currentGeneration = sessionGeneration,
+                expectedRevision = reconnectRevision,
+                currentRevision = chatStateRevision
+            )) return
+            rebindOutboxAfterAuthoritativeResume(
+                requestedStoredSessionId = activeStoredSessionId,
+                resumedStoredSessionId = resumed.handle.storedSessionId
+            )
+            sessionId = resumed.handle.runtimeSessionId
+            storedSessionId = resumed.handle.storedSessionId
+            if (::store.isInitialized) store.lastSessionId = resumed.handle.storedSessionId
+            val deferredFailureAfterResume = deferredModelSwitch
+                ?.takeIf { it.runtimeSessionId == activeRuntimeSessionId }
+                ?.let { pending ->
+                    val rebound = reconcileDeferredBoundaryAfterResume(
+                        pending = pending,
+                        activeRuntimeSessionId = resumed.handle.runtimeSessionId,
+                        serverRunning = resumed.isRunning
+                    )
+                    if (pending.awaitingCurrentTurnCompletion && !rebound.awaitingCurrentTurnCompletion) {
+                        completedTurnEpoch += 1
+                    }
+                    when (
+                        deferredResumeReconciliation(
+                            pending = rebound,
+                            serverRunning = resumed.isRunning,
+                            actualProvider = resumed.provider,
+                            actualModel = resumed.model
+                        )
+                    ) {
+                        DeferredResumeReconciliation.Applied -> {
+                            setDeferredModelSwitch(null)
+                            false
+                        }
+                        DeferredResumeReconciliation.Failed -> {
+                            setDeferredModelSwitch(null)
+                            true
+                        }
+                        DeferredResumeReconciliation.Waiting -> {
+                            setDeferredModelSwitch(rebound)
+                            false
+                        }
+                    }
+                } ?: false
+            val restored = resumed.messages.map { (fromUser, text) ->
                 ChatMessage(ChatMessage.nextId(), fromUser, text)
             }
+            syncCurrentChatModel(resumed.model, resumed.provider)
             // nie nadpisuj, jesli user cos wpisal lokalnie, czego nie ma w historii
             val localOnly = messages.value.any { msg ->
                 msg.fromUser && restored.none { r -> r.fromUser && r.text == msg.text }
@@ -238,16 +929,90 @@ class AppViewModel : ViewModel() {
             if (!localOnly && restored.isNotEmpty()) {
                 messages.value = restored
             }
-            thinking.value = false // historia pokazuje stan serwera — "mysli" juz nieaktualne
+            if (deferredFailureAfterResume) {
+                messages.value += ChatMessage(
+                    ChatMessage.nextId(),
+                    fromUser = false,
+                    text = "⚠️ Odroczona zmiana modelu nie została zastosowana podczas reconnectu. Wybierz model ponownie."
+                )
+            }
+            thinking.value = resumed.isRunning // session.resume is authoritative for the still-running turn
+            markChatStateMutation()
         } catch (_: Exception) {
             // sesja mogla wygasnac — zostaw co jest, user otworzy z listy
         }
     }
 
-    private fun flushOutbox() {
+    /**
+     * A new entry must not overtake a retained predecessor in the same durable-session FIFO.
+     * Pending predecessors are drained with queued=true; rejected/ambiguous predecessors remain a visible stop.
+     */
+    private suspend fun deferBehindEarlierOutboxEntry(entry: QueuedPrompt): Boolean {
+        if (outbox.isHead(entry)) return false
+        when (outbox.headFor(entry.storedSessionId)?.deliveryState) {
+            QueuedPromptDeliveryState.Pending -> flushOutboxNow()
+            QueuedPromptDeliveryState.Rejected,
+            QueuedPromptDeliveryState.Indeterminate -> {
+                thinking.value = false
+                appendPromptDeliveryNotice(
+                    "Wiadomość została zapisana za wcześniejszą pozycją wymagającą potwierdzenia."
+                )
+            }
+            null -> return false
+        }
+        return true
+    }
+
+    internal fun flushOutbox() {
+        viewModelScope.launch {
+            outboxFlushMutex.withLock { flushOutboxNow() }
+        }
+    }
+
+    private suspend fun flushOutboxNow() {
+        if (!canFlushSessionOutbox(
+                awaitingDeferredTurnBoundary = awaitingDeferredTurnBoundary.value,
+                awaitingDeferredModelResolution = awaitingDeferredModelResolution.value
+            )
+        ) return
         val sid = sessionId ?: return
-        while (outbox.isNotEmpty()) {
-            client.submitPrompt(sid, outbox.removeFirst())
+        val durableSessionId = storedSessionId ?: return
+        val generation = sessionGeneration
+        val entry = outbox.nextFor(durableSessionId) ?: return
+        when (val result = client.submitPromptResult(sid, entry.text, queued = true)) {
+            is PromptSubmissionResult.Accepted -> {
+                outbox.acknowledge(entry)
+                persistOutbox()
+                if (isCurrentPromptScope(sid, durableSessionId, generation)) {
+                    messages.value += ChatMessage(ChatMessage.nextId(), fromUser = true, text = entry.text)
+                    notePromptSubmitted()
+                    thinking.value = true
+                    markChatStateMutation()
+                }
+                // Exactly one ACKed prompt per flush: the next turn must reach a terminal state first.
+            }
+            is PromptSubmissionResult.Rejected -> {
+                outbox.reject(entry)
+                persistOutbox()
+                if (isCurrentPromptScope(sid, durableSessionId, generation)) {
+                    appendPromptDeliveryNotice(result.message)
+                }
+            }
+            PromptSubmissionResult.NotSent -> {
+                offline.value = true
+                quietReconnectLoop()
+            }
+            PromptSubmissionResult.Indeterminate -> {
+                outbox.markIndeterminate(entry)
+                persistOutbox()
+                if (isCurrentPromptScope(sid, durableSessionId, generation)) {
+                    appendPromptDeliveryNotice(
+                        "Nie można potwierdzić kolejki wiadomości. Nie wyślę jej ponownie automatycznie, aby uniknąć duplikatu."
+                    )
+                }
+                offline.value = true
+                quietReconnectLoop()
+            }
         }
     }
 
@@ -353,13 +1118,19 @@ class AppViewModel : ViewModel() {
         activeBot.value = bot
         messages.value = emptyList()
         sessions.value = emptyList()
-        sessionId = null
+        val generation = beginSessionTransition()
         val lastSession = store.lastSessionId
         if (lastSession.isNotBlank()) {
             try {
-                val (sid, history) = client.resumeSession(bot.name, lastSession)
-                sessionId = sid
-                messages.value = history.map { (fromUser, text) ->
+                val resumed = client.resumeSession(bot.name, lastSession)
+                if (!activateSession(
+                        generation = generation,
+                        handle = resumed.handle,
+                        model = resumed.model,
+                        provider = resumed.provider,
+                        requestedStoredSessionId = lastSession
+                    )) return
+                messages.value = resumed.messages.map { (fromUser, text) ->
                     ChatMessage(ChatMessage.nextId(), fromUser, text)
                 }
                 return
@@ -368,14 +1139,37 @@ class AppViewModel : ViewModel() {
             }
         }
         val list = client.listSessions(bot.name).sortedByDescending { it.startedAt }
-        if (list.isEmpty()) sessionId = client.createSession(bot.name) else sessions.value = list
+        if (!shouldApplySessionUpdate(generation, sessionGeneration)) return
+        if (list.isEmpty()) {
+            val created = client.createSession(bot.name)
+            activateSession(generation, created.handle, created.model, created.provider)
+        } else {
+            sessions.value = list
+        }
     }
 
     private fun subscribeEvents() {
         eventsJob?.cancel()
         eventsJob = viewModelScope.launch {
             client.events.collect { p ->
+                val eventSessionId = p.optString("session_id")
+                if (eventSessionId.isNotBlank() && eventSessionId != sessionId) return@collect
                 when (p.optString("type")) {
+                    "session.info" -> {
+                        val info = p.optJSONObject("payload") ?: return@collect
+                        val model = info.optString("model")
+                        val provider = info.optString("provider")
+                        if (model.isNotBlank() || provider.isNotBlank()) {
+                            val pending = deferredModelSwitch
+                            if (pending != null &&
+                                shouldReconcileDeferredSwitch(pending, sessionId) &&
+                                pending.model == model && pending.provider == provider
+                            ) {
+                                setDeferredModelSwitch(null)
+                            }
+                            syncCurrentChatModel(model, provider)
+                        }
+                    }
                     "message.delta" -> {
                         appendDelta(p.optJSONObject("payload")?.optString("text") ?: "")
                         // odpowiedz ruszyła — chowamy podglad myslenia
@@ -387,6 +1181,33 @@ class AppViewModel : ViewModel() {
                     "message.complete" -> {
                         finishMessage(p.optJSONObject("payload")?.optString("text"))
                         thinkingText.value = ""
+                        completedTurnEpoch += 1
+                        val pending = deferredModelSwitch
+                        if (pending?.awaitingCurrentTurnCompletion == true) {
+                            setDeferredModelSwitch(markDeferredSwitchCompletion(pending, sessionId))
+                            flushOutbox()
+                        } else {
+                            reconcileDeferredModelSwitchAfterTerminalEvent()
+                            flushOutbox()
+                        }
+                    }
+                    "error" -> {
+                        val message = p.optJSONObject("payload")?.optString("message")
+                            .orEmpty()
+                            .ifBlank { p.optString("message") }
+                        if (message.isNotBlank()) {
+                            messages.value += ChatMessage(
+                                ChatMessage.nextId(),
+                                fromUser = false,
+                                text = "⚠️ $message"
+                            )
+                            markChatStateMutation()
+                        }
+                        when (deferredErrorAction(deferredModelSwitch, sessionId)) {
+                            DeferredErrorAction.ReconcileAuthoritatively ->
+                                reconcileDeferredErrorThroughAuthoritativeResume()
+                            DeferredErrorAction.Ignore -> Unit
+                        }
                     }
                     "reasoning.delta" -> {
                         // przyrost tekstu rozumowania (jak w CLI: _reasoning_buf += text)
@@ -395,6 +1216,7 @@ class AppViewModel : ViewModel() {
                             thinkingText.value = (thinkingText.value + t).takeLast(8000)
                             thinking.value = true
                             thinkingHasContent.value = true
+                            markChatStateMutation()
                         }
                     }
                     "thinking.delta" -> {
@@ -404,6 +1226,7 @@ class AppViewModel : ViewModel() {
                             statusText.value = t
                         }
                         thinking.value = true
+                        markChatStateMutation()
                     }
                 }
             }
@@ -421,6 +1244,7 @@ class AppViewModel : ViewModel() {
             list.add(ChatMessage(ChatMessage.nextId(), fromUser = false, text = delta, streaming = true))
         }
         messages.value = list
+        markChatStateMutation()
     }
 
     private fun finishMessage(full: String?) {
@@ -436,25 +1260,30 @@ class AppViewModel : ViewModel() {
                 last.copy(streaming = false)
         }
         messages.value = list
+        markChatStateMutation()
     }
 
     fun openChat(bot: BotInfo) {
         activeBot.value = bot
         messages.value = emptyList()
         sessions.value = emptyList()
-        sessionId = null
+        val generation = beginSessionTransition()
         store.lastBotName = bot.name
         viewModelScope.launch {
             try {
                 val list = client.listSessions(bot.name)
                     .sortedByDescending { it.startedAt }
+                if (!shouldApplySessionUpdate(generation, sessionGeneration)) return@launch
                 if (list.isEmpty()) {
-                    sessionId = client.createSession(bot.name)
+                    val created = client.createSession(bot.name)
+                    activateSession(generation, created.handle, created.model, created.provider)
                 } else {
                     sessions.value = list
                 }
             } catch (e: Exception) {
-                messages.value = listOf(ChatMessage(ChatMessage.nextId(), false, "⚠️ ${e.message}"))
+                if (shouldApplySessionUpdate(generation, sessionGeneration)) {
+                    messages.value = listOf(ChatMessage(ChatMessage.nextId(), false, "⚠️ ${e.message}"))
+                }
             }
         }
     }
@@ -463,12 +1292,16 @@ class AppViewModel : ViewModel() {
         val bot = activeBot.value ?: return
         sessions.value = emptyList()
         messages.value = emptyList()
+        val generation = beginSessionTransition()
         store.lastSessionId = ""
         viewModelScope.launch {
             try {
-                sessionId = client.createSession(bot.name)
+                val created = client.createSession(bot.name)
+                activateSession(generation, created.handle, created.model, created.provider)
             } catch (e: Exception) {
-                messages.value = listOf(ChatMessage(ChatMessage.nextId(), false, "⚠️ ${e.message}"))
+                if (shouldApplySessionUpdate(generation, sessionGeneration)) {
+                    messages.value = listOf(ChatMessage(ChatMessage.nextId(), false, "⚠️ ${e.message}"))
+                }
             }
         }
     }
@@ -476,39 +1309,92 @@ class AppViewModel : ViewModel() {
     fun resumeChat(info: SessionInfo) {
         val bot = activeBot.value ?: return
         sessions.value = emptyList()
+        val generation = beginSessionTransition()
         thinking.value = true
         viewModelScope.launch {
             try {
-                val (sid, history) = client.resumeSession(bot.name, info.id)
-                sessionId = sid
-                store.lastSessionId = info.id
-                messages.value = history.map { (fromUser, text) ->
+                val resumed = client.resumeSession(bot.name, info.id)
+                if (!activateSession(
+                        generation = generation,
+                        handle = resumed.handle,
+                        model = resumed.model,
+                        provider = resumed.provider,
+                        requestedStoredSessionId = info.id
+                    )) return@launch
+                messages.value = resumed.messages.map { (fromUser, text) ->
                     ChatMessage(ChatMessage.nextId(), fromUser, text)
                 }
             } catch (e: Exception) {
-                messages.value = listOf(ChatMessage(ChatMessage.nextId(), false, "⚠️ ${e.message}"))
+                if (shouldApplySessionUpdate(generation, sessionGeneration)) {
+                    messages.value = listOf(ChatMessage(ChatMessage.nextId(), false, "⚠️ ${e.message}"))
+                }
             } finally {
-                thinking.value = false
+                if (shouldApplySessionUpdate(generation, sessionGeneration)) thinking.value = false
             }
         }
     }
 
     fun send(text: String) {
-        val sid = sessionId
-        if (sid == null) return
-        messages.value += ChatMessage(ChatMessage.nextId(), fromUser = true, text = text)
+        val sid = sessionId ?: return
+        val durableSessionId = storedSessionId ?: return
+        if (thinking.value || messages.value.lastOrNull()?.streaming == true ||
+            modelSwitchInFlight.value || awaitingDeferredTurnBoundary.value ||
+            awaitingDeferredModelResolution.value
+        ) return
+        val generation = sessionGeneration
+        val entry = outbox.enqueue(durableSessionId, text)
+        persistOutbox()
+        markChatStateMutation()
+        thinking.value = true
         // nowa tura: czysc podglad myslenia
         thinkingText.value = ""
         statusText.value = ""
         thinkingHasContent.value = false
         thinkingOpen.value = true
-        val sent = client.submitPrompt(sid, text)
-        if (sent) {
-            thinking.value = true
-        } else {
-            outbox.addLast(text) // wyśle się po reconnect; historia i tak wróci z serwera
-            offline.value = true
-            quietReconnectLoop()
+        viewModelScope.launch {
+            outboxFlushMutex.withLock {
+                if (deferBehindEarlierOutboxEntry(entry)) return@withLock
+                when (val result = client.submitPromptResult(sid, entry.text)) {
+                    is PromptSubmissionResult.Accepted -> {
+                        outbox.acknowledge(entry)
+                        persistOutbox()
+                        if (isCurrentPromptScope(sid, durableSessionId, generation)) {
+                            messages.value += ChatMessage(ChatMessage.nextId(), fromUser = true, text = entry.text)
+                            notePromptSubmitted()
+                            thinking.value = true
+                            markChatStateMutation()
+                        }
+                    }
+                    PromptSubmissionResult.NotSent -> {
+                        if (isCurrentPromptScope(sid, durableSessionId, generation)) {
+                            thinking.value = false
+                            appendPromptDeliveryNotice("Wiadomość oczekuje na ponowne połączenie.")
+                        }
+                        offline.value = true
+                        quietReconnectLoop()
+                    }
+                    is PromptSubmissionResult.Rejected -> {
+                        outbox.reject(entry)
+                        persistOutbox()
+                        if (isCurrentPromptScope(sid, durableSessionId, generation)) {
+                            thinking.value = false
+                            appendPromptDeliveryNotice(result.message)
+                        }
+                    }
+                    PromptSubmissionResult.Indeterminate -> {
+                        outbox.markIndeterminate(entry)
+                        persistOutbox()
+                        if (isCurrentPromptScope(sid, durableSessionId, generation)) {
+                            thinking.value = false
+                            appendPromptDeliveryNotice(
+                                "Nie można potwierdzić wysłania. Nie wyślę go ponownie automatycznie, aby uniknąć duplikatu."
+                            )
+                        }
+                        offline.value = true
+                        quietReconnectLoop()
+                    }
+                }
+            }
         }
     }
 
@@ -516,7 +1402,7 @@ class AppViewModel : ViewModel() {
         activeBot.value = null
         messages.value = emptyList()
         sessions.value = emptyList()
-        sessionId = null
+        beginSessionTransition()
         thinking.value = false
         routines.value = emptyList()
         if (::store.isInitialized) {

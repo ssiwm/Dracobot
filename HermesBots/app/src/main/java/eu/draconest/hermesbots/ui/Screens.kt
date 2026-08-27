@@ -57,6 +57,14 @@ import androidx.compose.ui.unit.dp
 import eu.draconest.hermesbots.data.BotInfo
 import com.composables.icons.lucide.R
 import eu.draconest.hermesbots.data.ChatMessage
+import eu.draconest.hermesbots.data.ModelProviderOption
+import eu.draconest.hermesbots.data.ModelSwitchResult
+
+private data class PendingModelSwitch(
+    val provider: String,
+    val model: String,
+    val confirmationMessage: String
+)
 
 /** Determinystyczny „blob avatar" z nazwy bota — patrz BotAvatar.kt (1:1 z desktopu). */
 
@@ -318,13 +326,19 @@ fun ChatScreen(
     thinkingOpen: Boolean = true,
     onToggleThinking: () -> Unit = {},
     offline: Boolean = false,
+    canSend: Boolean = true,
+    canSwitchModel: Boolean = true,
     onSend: (String) -> Unit,
     onBack: () -> Unit,
     onRoutines: () -> Unit = {},
     currentModel: String = "",
     currentProvider: String = "",
-    onSwitchModel: suspend (provider: String, model: String) -> String? = { _, _ -> null },
-    modelOptionsLoader: suspend () -> List<Pair<String, List<String>>> = { emptyList() },
+    onSwitchModel: suspend (
+        provider: String,
+        model: String,
+        confirmExpensiveModel: Boolean
+    ) -> ModelSwitchResult = { _, _, _ -> ModelSwitchResult.Applied },
+    modelOptionsLoader: suspend () -> List<ModelProviderOption> = { emptyList() },
     attachError: String? = null,
     onClearAttachError: () -> Unit = {},
     pickFileLauncher: (() -> Unit)? = null,
@@ -339,6 +353,9 @@ fun ChatScreen(
     val keyboard = androidx.compose.ui.platform.LocalSoftwareKeyboardController.current
     val context = androidx.compose.ui.platform.LocalContext.current
     var showModelPicker by remember { mutableStateOf(false) }
+    val modelSwitchBlocked = !canSwitchModel
+    var pendingModelSwitch by remember { mutableStateOf<PendingModelSwitch?>(null) }
+    var confirmingModelSwitch by remember { mutableStateOf(false) }
     val scope = androidx.compose.runtime.rememberCoroutineScope()
     var showImageDialog by remember { mutableStateOf(false) }
     var imagePrompt by remember { mutableStateOf("") }
@@ -374,6 +391,80 @@ fun ChatScreen(
         )
     }
 
+    pendingModelSwitch?.let { pending ->
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = {
+                if (!confirmingModelSwitch) pendingModelSwitch = null
+            },
+            title = { Text("Potwierdź zmianę modelu") },
+            text = {
+                Column {
+                    Text(pending.confirmationMessage)
+                    Spacer(Modifier.height(12.dp))
+                    Text(
+                        "${pending.provider} · ${pending.model}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        confirmingModelSwitch = true
+                        scope.launch {
+                            try {
+                                when (val outcome = onSwitchModel(
+                                    pending.provider,
+                                    pending.model,
+                                    true
+                                )) {
+                                    ModelSwitchResult.Applied -> pendingModelSwitch = null
+                                    ModelSwitchResult.Deferred -> {
+                                        pendingModelSwitch = null
+                                        android.widget.Toast.makeText(
+                                            context,
+                                            "Zmiana modelu oczekuje na zakończenie bieżącej odpowiedzi.",
+                                            android.widget.Toast.LENGTH_LONG
+                                        ).show()
+                                    }
+                                    is ModelSwitchResult.ConfirmationRequired -> {
+                                        pendingModelSwitch = pending.copy(
+                                            confirmationMessage = outcome.message
+                                        )
+                                    }
+                                    ModelSwitchResult.TimedOut -> {
+                                        android.widget.Toast.makeText(
+                                            context,
+                                            "⚠️ Zmiana modelu przekroczyła limit; sprawdzam stan sesji bez ponawiania.",
+                                            android.widget.Toast.LENGTH_LONG
+                                        ).show()
+                                    }
+                                    is ModelSwitchResult.Failure -> {
+                                        android.widget.Toast.makeText(
+                                            context,
+                                            "⚠️ ${outcome.message}",
+                                            android.widget.Toast.LENGTH_LONG
+                                        ).show()
+                                    }
+                                }
+                            } finally {
+                                confirmingModelSwitch = false
+                            }
+                        }
+                    },
+                    enabled = !confirmingModelSwitch
+                ) { Text(if (confirmingModelSwitch) "Zmieniam…" else "Potwierdź") }
+            },
+            dismissButton = {
+                androidx.compose.material3.TextButton(
+                    onClick = { pendingModelSwitch = null },
+                    enabled = !confirmingModelSwitch
+                ) { Text("Anuluj") }
+            }
+        )
+    }
+
     if (showModelPicker) {
         androidx.compose.material3.ModalBottomSheet(onDismissRequest = { showModelPicker = false }) {
             ModelPickerContent(
@@ -382,8 +473,36 @@ fun ChatScreen(
                 onPick = { provider, model ->
                     showModelPicker = false
                     scope.launch {
-                        onSwitchModel(provider, model)?.let { err ->
-                            android.widget.Toast.makeText(context, "⚠️ $err", android.widget.Toast.LENGTH_LONG).show()
+                        when (val outcome = onSwitchModel(provider, model, false)) {
+                            ModelSwitchResult.Applied -> Unit
+                            ModelSwitchResult.Deferred -> {
+                                android.widget.Toast.makeText(
+                                    context,
+                                    "Zmiana modelu oczekuje na zakończenie bieżącej odpowiedzi.",
+                                    android.widget.Toast.LENGTH_LONG
+                                ).show()
+                            }
+                            is ModelSwitchResult.ConfirmationRequired -> {
+                                pendingModelSwitch = PendingModelSwitch(
+                                    provider = provider,
+                                    model = model,
+                                    confirmationMessage = outcome.message
+                                )
+                            }
+                            ModelSwitchResult.TimedOut -> {
+                                android.widget.Toast.makeText(
+                                    context,
+                                    "⚠️ Zmiana modelu przekroczyła limit; sprawdzam stan sesji bez ponawiania.",
+                                    android.widget.Toast.LENGTH_LONG
+                                ).show()
+                            }
+                            is ModelSwitchResult.Failure -> {
+                                android.widget.Toast.makeText(
+                                    context,
+                                    "⚠️ ${outcome.message}",
+                                    android.widget.Toast.LENGTH_LONG
+                                ).show()
+                            }
                         }
                     }
                 },
@@ -411,8 +530,16 @@ fun ChatScreen(
                             Text(
                                 (currentModel.ifBlank { "model" }) + " ▾",
                                 style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier.combinedClickableCompat(onClick = { showModelPicker = true })
+                                color = if (modelSwitchBlocked) {
+                                    MaterialTheme.colorScheme.onSurfaceVariant
+                                } else {
+                                    MaterialTheme.colorScheme.primary
+                                },
+                                modifier = if (modelSwitchBlocked) {
+                                    Modifier
+                                } else {
+                                    Modifier.combinedClickableCompat(onClick = { showModelPicker = true })
+                                }
                             )
                         }
                     }
@@ -470,14 +597,14 @@ fun ChatScreen(
                 trailingIcon = {
                     IconButton(
                         onClick = {
-                            if (input.isNotBlank()) {
+                            if (input.isNotBlank() && canSend) {
                                 onSend(input.trim())
                                 input = ""
                                 keyboard?.hide()
                                 haptic.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.TextHandleMove)
                             }
                         },
-                        enabled = input.isNotBlank()
+                        enabled = input.isNotBlank() && canSend
                     ) {
                         Icon(painterResource(R.drawable.lucide_ic_send), contentDescription = "Wyślij")
                     }
@@ -510,7 +637,7 @@ fun ChatScreen(
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 // pusty czat -> sugestie promptow jak w Groku
-                if (messages.isEmpty() && !thinking) {
+                if (messages.isEmpty() && canSend) {
                     item(key = "suggestions") {
                         SuggestionChips(
                             botName = bot.name,

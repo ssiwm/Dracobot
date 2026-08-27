@@ -38,6 +38,7 @@ import eu.draconest.hermesbots.data.AppStore
 import eu.draconest.hermesbots.data.AppViewModel
 import eu.draconest.hermesbots.data.CrashGuard
 import eu.draconest.hermesbots.data.HermesMessagingService
+import eu.draconest.hermesbots.data.chatActionAvailability
 import eu.draconest.hermesbots.ui.ChatScreen
 import eu.draconest.hermesbots.ui.ConnectScreen
 import eu.draconest.hermesbots.ui.DeleteBotDialog
@@ -135,6 +136,9 @@ private fun AppRoot(vm: AppViewModel = viewModel(), appStore: AppStore) {
     val thinkingOpen by vm.thinkingOpen.collectAsState()
     val currentModel by vm.currentModel.collectAsState()
     val currentProvider by vm.currentProvider.collectAsState()
+    val modelSwitchInFlight by vm.modelSwitchInFlight.collectAsState()
+    val awaitingDeferredTurnBoundary by vm.awaitingDeferredTurnBoundary.collectAsState()
+    val awaitingDeferredModelResolution by vm.awaitingDeferredModelResolution.collectAsState()
     val attachError by vm.attachError.collectAsState()
     val generatingImage by vm.generatingImage.collectAsState()
     val appContext = androidx.compose.ui.platform.LocalContext.current
@@ -149,7 +153,7 @@ private fun AppRoot(vm: AppViewModel = viewModel(), appStore: AppStore) {
 
     // podlacz trwaly store + auto-connect + obserwacja linku WS
     remember {
-        vm.store = appStore; vm.autoConnect(); vm.observeLink()
+        vm.initializeStore(appStore); vm.autoConnect(); vm.observeLink()
         HermesMessagingService.registerTokenOnBridge(appStore.context())
         true
     }
@@ -173,6 +177,15 @@ private fun AppRoot(vm: AppViewModel = viewModel(), appStore: AppStore) {
     }
 
     val offline by vm.offline.collectAsState()
+    val chatActions = chatActionAvailability(
+        thinking = thinking,
+        streaming = messages.lastOrNull()?.streaming == true,
+        modelSwitchInFlight = modelSwitchInFlight,
+        awaitingDeferredTurnBoundary = awaitingDeferredTurnBoundary,
+        awaitingDeferredModelResolution = awaitingDeferredModelResolution
+    )
+    val canSubmitPrompt = chatActions.canSubmitPrompt
+    val canSwitchModel = chatActions.canSwitchModel
 
     var url by remember { mutableStateOf(appStore.url) }
     var username by remember { mutableStateOf(appStore.username) }
@@ -266,12 +279,16 @@ private fun AppRoot(vm: AppViewModel = viewModel(), appStore: AppStore) {
             thinkingOpen = thinkingOpen,
             onToggleThinking = vm::toggleThinking,
             offline = offline,
+            canSend = canSubmitPrompt,
+            canSwitchModel = canSwitchModel,
             onSend = vm::send,
             onBack = vm::closeChat,
             onRoutines = vm::openRoutines,
             currentModel = currentModel,
             currentProvider = currentProvider,
-            onSwitchModel = { provider, model -> vm.switchModel(provider, model) },
+            onSwitchModel = { provider, model, confirmExpensive ->
+                vm.switchModel(provider, model, confirmExpensive)
+            },
             modelOptionsLoader = { vm.loadModelOptions() },
             attachError = attachError,
             onClearAttachError = vm::clearAttachError,
@@ -279,7 +296,7 @@ private fun AppRoot(vm: AppViewModel = viewModel(), appStore: AppStore) {
             generatingImage = generatingImage,
             onGenerateImage = { vm.generateImage(it) },
             onRegenerate = { vm.regenerateLast() },
-            regenerateEnabled = !thinking
+            regenerateEnabled = canSubmitPrompt
         )
     }
 }

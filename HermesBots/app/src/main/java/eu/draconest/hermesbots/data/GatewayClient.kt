@@ -1,13 +1,18 @@
 package eu.draconest.hermesbots.data
 
 import eu.draconest.hermesbots.BuildConfig
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withTimeout
 import okhttp3.Call
 import okhttp3.Callback
 import okhttp3.OkHttpClient
@@ -55,6 +60,68 @@ data class RoutineInfo(
     val nextRunAt: Long?
 )
 
+/** One provider row from model.options; aliases preserve canonical custom-provider IDs. */
+data class ModelProviderOption(
+    val slug: String,
+    val models: List<String>,
+    val aliases: List<String> = emptyList()
+)
+
+/** Session-scoped catalog plus the gateway's authoritative current identity. */
+data class ModelOptionsPayload(
+    val providers: List<ModelProviderOption>,
+    val model: String,
+    val provider: String
+)
+
+/** A runtime WS session id paired with the durable key accepted by session.resume. */
+data class SessionHandle(
+    val runtimeSessionId: String,
+    val storedSessionId: String
+)
+
+/** session.create returns both identities; old gateways may use one id for both. */
+internal fun sessionHandleForCreate(runtimeSessionId: String, storedSessionId: String): SessionHandle {
+    val runtime = runtimeSessionId.trim()
+    require(runtime.isNotEmpty()) { "session.create without runtime session_id" }
+    return SessionHandle(
+        runtimeSessionId = runtime,
+        storedSessionId = storedSessionId.trim().ifBlank { runtime }
+    )
+}
+
+/** session.resume receives a persistent key but always returns a fresh runtime session id. */
+internal fun sessionHandleForResume(
+    requestedStoredSessionId: String,
+    returnedRuntimeSessionId: String,
+    returnedStoredSessionId: String
+): SessionHandle {
+    val requested = requestedStoredSessionId.trim()
+    require(requested.isNotEmpty()) { "session.resume without stored session key" }
+    val runtime = returnedRuntimeSessionId.trim()
+    require(runtime.isNotEmpty()) { "session.resume without runtime session_id" }
+    return SessionHandle(
+        runtimeSessionId = runtime,
+        storedSessionId = returnedStoredSessionId.trim().ifBlank { requested }
+    )
+}
+
+/** A new session handle plus the model identity provided by session.create. */
+data class CreatedSession(
+    val handle: SessionHandle,
+    val model: String,
+    val provider: String
+)
+
+/** A resumed session handle plus its history and authoritative identity. */
+data class ResumedSession(
+    val handle: SessionHandle,
+    val messages: List<Pair<Boolean, String>>,
+    val model: String,
+    val provider: String,
+    val isRunning: Boolean
+)
+
 /** Stan gniazda WS — niezależny od "czy w ogóle zalogowano". */
 enum class LinkState { UP, DOWN }
 
@@ -75,15 +142,203 @@ internal fun modelSwitchErrorForUi(error: Throwable): String =
     (error.message ?: "Nie udało się zmienić modelu")
         .removePrefix("RPC config.set: ")
 
+/** The explicit state returned by a session-scoped model-switch request. */
+sealed interface ModelSwitchResult {
+    data object Applied : ModelSwitchResult
+    data object Deferred : ModelSwitchResult
+    data object TimedOut : ModelSwitchResult
+    data class ConfirmationRequired(val message: String) : ModelSwitchResult
+    data class Failure(val message: String) : ModelSwitchResult
+}
+
+/** The acknowledgement outcome for a prompt frame. Only Accepted proves gateway ownership. */
+internal sealed interface PromptSubmissionResult {
+    data class Accepted(val status: String) : PromptSubmissionResult
+    data class Rejected(val code: Int?, val message: String) : PromptSubmissionResult
+    data object NotSent : PromptSubmissionResult
+    data object Indeterminate : PromptSubmissionResult
+}
+
+private const val PROMPT_ACK_TIMEOUT_MS = 12_000L
+private const val MODEL_SWITCH_TIMEOUT_MS = 12_000L
+private const val DEBUG_TLS_FACTORY = "eu.draconest.hermesbots.data.DebugGatewayTls"
+
+/**
+ * Debug source supplies the relaxation factory for a local self-signed gateway. Its bytecode is
+ * absent from release, whose client therefore always remains on platform certificate validation.
+ */
+private fun debugTlsIfAvailable(client: OkHttpClient): OkHttpClient {
+    if (!BuildConfig.DEBUG) return client
+    return runCatching {
+        Class.forName(DEBUG_TLS_FACTORY)
+            .getMethod("apply", OkHttpClient::class.java)
+            .invoke(null, client) as? OkHttpClient ?: client
+    }.getOrDefault(client)
+}
+
+/**
+ * A guarded model selection is not applied until the user confirms it in a
+ * second request with confirm_expensive_model=true.
+ */
+internal fun modelSwitchOutcome(
+    confirmationRequired: Boolean,
+    confirmationMessage: String,
+    warning: String,
+    deferred: Boolean = false
+): ModelSwitchResult {
+    if (confirmationRequired) {
+        val message = confirmationMessage
+            .ifBlank { warning }
+            .ifBlank { "Wybrany model wymaga potwierdzenia." }
+        return ModelSwitchResult.ConfirmationRequired(message)
+    }
+    return if (deferred) ModelSwitchResult.Deferred else ModelSwitchResult.Applied
+}
+
+internal fun modelSwitchOutcomeFromResponse(response: JSONObject): ModelSwitchResult =
+    modelSwitchOutcome(
+        confirmationRequired = response.optBoolean("confirm_required"),
+        confirmationMessage = response.optString("confirm_message"),
+        warning = response.optString("warning"),
+        deferred = response.optBoolean("deferred")
+    )
+
+/**
+ * Keep the pending RPC map bounded when send fails, a caller is cancelled, or a response arrives.
+ * Route may remove the same entry first; compare-and-remove makes the finally block race-safe.
+ */
+internal suspend fun <T> awaitRpcResponse(
+    pending: ConcurrentHashMap<Int, CompletableDeferred<T>>,
+    id: Int,
+    deferred: CompletableDeferred<T>,
+    send: () -> Boolean
+): T {
+    pending[id] = deferred
+    try {
+        check(send()) { "Nie udało się wysłać ramki" }
+        return deferred.await()
+    } finally {
+        pending.remove(id, deferred)
+    }
+}
+
+/** Cancel all waiting RPCs before dropping their map entries. */
+internal fun <T> cancelPendingRequests(pending: ConcurrentHashMap<Int, CompletableDeferred<T>>) {
+    val waiting = pending.values.toList()
+    waiting.forEach { it.cancel() }
+    pending.clear()
+}
+
+/** Ignore delayed callbacks from a WebSocket connection superseded by a later connect/close. */
+internal fun shouldHandleConnectionCallback(callbackEpoch: Int, currentEpoch: Int): Boolean =
+    callbackEpoch == currentEpoch
+
+internal data class ConnectionTransition<T : Any>(val epoch: Int, val displacedSocket: T?)
+
+/** A point-in-time transport identity; a stale snapshot may never mutate a newer connection. */
+internal data class ConnectionSnapshot<T : Any>(val epoch: Int, val socket: T?)
+
+/** Atomically owns the active transport and its link state across callback and send races. */
+internal class ConnectionEpochState<T : Any>(
+    private val publishLinkState: (LinkState) -> Unit = {}
+) {
+    private var epoch = 0
+    private var socket: T? = null
+    private var linkState = LinkState.DOWN
+
+    private fun setLinkState(next: LinkState) {
+        linkState = next
+        publishLinkState(next)
+    }
+
+    private fun matches(snapshot: ConnectionSnapshot<T>): Boolean =
+        snapshot.socket != null && snapshot.epoch == epoch && socket === snapshot.socket
+
+    @Synchronized
+    fun beginConnection(): ConnectionTransition<T> {
+        epoch += 1
+        val displaced = socket
+        socket = null
+        setLinkState(LinkState.DOWN)
+        return ConnectionTransition(epoch = epoch, displacedSocket = displaced)
+    }
+
+    @Synchronized
+    fun currentEpoch(): Int = epoch
+
+    @Synchronized
+    fun isCurrent(expectedEpoch: Int): Boolean =
+        shouldHandleConnectionCallback(expectedEpoch, epoch)
+
+    @Synchronized
+    fun currentSocket(): T? = socket
+
+    @Synchronized
+    fun currentLinkState(): LinkState = linkState
+
+    @Synchronized
+    fun snapshot(): ConnectionSnapshot<T> = ConnectionSnapshot(epoch = epoch, socket = socket)
+
+    @Synchronized
+    fun installIfCurrent(expectedEpoch: Int, candidate: T): Boolean {
+        if (!shouldHandleConnectionCallback(expectedEpoch, epoch)) return false
+        socket = candidate
+        setLinkState(LinkState.UP)
+        return true
+    }
+
+    @Synchronized
+    fun clearIfCurrent(expectedEpoch: Int, candidate: T): Boolean {
+        if (!shouldHandleConnectionCallback(expectedEpoch, epoch) || socket !== candidate) return false
+        socket = null
+        setLinkState(LinkState.DOWN)
+        return true
+    }
+
+    /** Handles a failure before onOpen, when the candidate is not yet installed. */
+    @Synchronized
+    fun failConnectionIfCurrent(expectedEpoch: Int): Boolean {
+        if (!shouldHandleConnectionCallback(expectedEpoch, epoch)) return false
+        socket = null
+        setLinkState(LinkState.DOWN)
+        return true
+    }
+
+    /** A failure may set DOWN only if the exact send snapshot is still installed. */
+    @Synchronized
+    fun markSendFailedIfCurrent(snapshot: ConnectionSnapshot<T>): Boolean {
+        if (!matches(snapshot)) return false
+        socket = null
+        setLinkState(LinkState.DOWN)
+        return true
+    }
+
+    /** Validate ownership and run the nonblocking sender while that ownership cannot change. */
+    @Synchronized
+    fun sendIfCurrent(snapshot: ConnectionSnapshot<T>, send: (T) -> Boolean): Boolean {
+        if (!matches(snapshot)) return false
+        if (send(requireNotNull(socket))) return true
+        socket = null
+        setLinkState(LinkState.DOWN)
+        return false
+    }
+
+    @Synchronized
+    fun isInstalledSocket(expectedEpoch: Int, candidate: T): Boolean =
+        shouldHandleConnectionCallback(expectedEpoch, epoch) && socket === candidate
+}
+
 /**
  * Klient Hermes dashboard WS JSON-RPC — port z działającego PoC (poc_gateway.py):
  * auth: token ze SPA HTML (__HERMES_SESSION_TOKEN__), WS /api/ws?token=...
  * metody: profiles.list / session.create{profile} / prompt.submit{session_id,text}
  * stream: method=event, params.type=message.delta|message.complete, params.payload.text
  */
-class GatewayClient(private val ok: OkHttpClient = OkHttpClient()) {
+open class GatewayClient(private val ok: OkHttpClient = OkHttpClient()) {
 
-    private var ws: WebSocket? = null
+    private val _linkState = MutableStateFlow(LinkState.DOWN)
+    open val linkState = _linkState.asStateFlow()
+    private val connections = ConnectionEpochState<WebSocket> { state -> _linkState.value = state }
     private var baseUrl: String = ""
     private var basicAuth: String? = null
     private val nextId = AtomicInteger(1)
@@ -91,15 +346,11 @@ class GatewayClient(private val ok: OkHttpClient = OkHttpClient()) {
 
     private val _events = MutableSharedFlow<JSONObject>(
         replay = 0, extraBufferCapacity = 256, onBufferOverflow = BufferOverflow.DROP_OLDEST)
-    val events = _events.asSharedFlow()
+    open val events = _events.asSharedFlow()
 
-    private val _linkState = MutableStateFlow(LinkState.DOWN)
-    val linkState = _linkState.asStateFlow()
-
-    // Release (bots.draconest.eu): normalny, publiczny cert CF/Let's Encrypt — pelna weryfikacja.
-    // Debug (IP:9443 / localhost): trustAll dla self-signed certu Caddy.
-    private val http: OkHttpClient = run {
-        val base = ok.newBuilder()
+    // Release always uses platform TLS and hostname validation. Debug-only TLS relaxation lives in src/debug.
+    private val http: OkHttpClient = debugTlsIfAvailable(
+        ok.newBuilder()
             .addInterceptor { chain ->
                 // Własny UA — Cloudflare nie lubi domyślnego "okhttp"
                 chain.proceed(
@@ -108,29 +359,16 @@ class GatewayClient(private val ok: OkHttpClient = OkHttpClient()) {
                         .build()
                 )
             }
-        if (BuildConfig.DEBUG) {
-            val trustAll = object : javax.net.ssl.X509TrustManager {
-                override fun checkClientTrusted(
-                    chain: Array<java.security.cert.X509Certificate>, authType: String) {}
-                override fun checkServerTrusted(
-                    chain: Array<java.security.cert.X509Certificate>, authType: String) {}
-                override fun getAcceptedIssuers(): Array<java.security.cert.X509Certificate> = arrayOf()
-            }
-            val ssl = javax.net.ssl.SSLContext.getInstance("TLS").apply {
-                init(null, arrayOf(trustAll), java.security.SecureRandom())
-            }
-            base.sslSocketFactory(ssl.socketFactory, trustAll)
-                .hostnameVerifier { _, _ -> true }
-                .build()
-        } else {
-            base.build()
-        }
-    }
+            .build()
+    )
 
     /** Pobiera token sesji dashboardu (tryb loopback; opcjonalnie za proxy z Basic Auth). */
-    private suspend fun fetchToken(): String {
-        val builder = Request.Builder().url("$baseUrl/")
-        basicAuth?.let { builder.header("Authorization", it) }
+    private suspend fun fetchToken(
+        dashboardUrl: String = baseUrl,
+        authorization: String? = basicAuth
+    ): String {
+        val builder = Request.Builder().url("$dashboardUrl/")
+        authorization?.let { builder.header("Authorization", it) }
         val body = http.newCall(builder.build()).await().use { resp ->
             if (resp.code == 401) {
                 error("Proxy odrzuciło login/hasło (401). Sprawdź użytkownika i hasło.")
@@ -143,39 +381,66 @@ class GatewayClient(private val ok: OkHttpClient = OkHttpClient()) {
             ?: error("Brak tokenu w SPA (gated mode?) — zob. skill hermes-gateway-client")
     }
 
+    /** Atomically invalidates an older transport before starting or closing a connection. */
+    private fun resetConnection(): Int {
+        val transition = connections.beginConnection()
+        cancelPendingRequests(pending)
+        transition.displacedSocket?.close(1000, "superseded")
+        return transition.epoch
+    }
+
     /** Łączy WS i zwraca po otwarciu. Zrzuca wyjątek przy błędzie auth/połączenia. */
-    suspend fun connect(url: String, username: String = "", password: String = "") {
-        close()
-        baseUrl = url.trimEnd('/')
-        if (username.isNotBlank()) {
-            val cred = okhttp3.Credentials.basic(username, password)
-            basicAuth = cred
-        } else {
-            basicAuth = null
+    open suspend fun connect(url: String, username: String = "", password: String = "") {
+        val dashboardUrl = url.trimEnd('/')
+        val authorization = username.takeIf { it.isNotBlank() }
+            ?.let { okhttp3.Credentials.basic(it, password) }
+        val callbackEpoch = resetConnection()
+        baseUrl = dashboardUrl
+        basicAuth = authorization
+        val token = fetchToken(dashboardUrl, authorization)
+        if (!connections.isCurrent(callbackEpoch)) {
+            throw CancellationException("Połączenie zastąpione przez nowszą próbę")
         }
-        val token = fetchToken()
-        val wsUrl = baseUrl.replaceFirst("http", "ws") + "/api/ws?token=" + token
+        val wsUrl = dashboardUrl.replaceFirst("http", "ws") + "/api/ws?token=" + token
         val deferred = CompletableDeferred<Unit>()
         val builder = Request.Builder().url(wsUrl)
-        basicAuth?.let { builder.header("Authorization", it) }
-        ws = http.newWebSocket(builder.build(), object : WebSocketListener() {
+        authorization?.let { builder.header("Authorization", it) }
+        val candidate = http.newWebSocket(builder.build(), object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
-                _linkState.value = LinkState.UP
+                if (!connections.installIfCurrent(callbackEpoch, webSocket)) {
+                    deferred.cancel()
+                    webSocket.close(1000, "superseded")
+                    return
+                }
                 deferred.complete(Unit)
             }
+
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                _linkState.value = LinkState.DOWN
-                pending.values.forEach { it.completeExceptionally(t) }
-                pending.clear()
+                if (!connections.failConnectionIfCurrent(callbackEpoch)) {
+                    deferred.cancel()
+                    return
+                }
+                cancelPendingRequests(pending)
                 deferred.completeExceptionally(t)
             }
+
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-                _linkState.value = LinkState.DOWN
-                pending.values.forEach { it.cancel() }
-                pending.clear()
+                if (!connections.failConnectionIfCurrent(callbackEpoch)) {
+                    deferred.cancel()
+                    return
+                }
+                cancelPendingRequests(pending)
+                deferred.cancel()
             }
-            override fun onMessage(webSocket: WebSocket, text: String) = route(text)
+
+            override fun onMessage(webSocket: WebSocket, text: String) {
+                if (connections.isInstalledSocket(callbackEpoch, webSocket)) route(text)
+            }
         })
+        if (!connections.isCurrent(callbackEpoch)) {
+            candidate.cancel()
+            throw CancellationException("Połączenie zastąpione przez nowszą próbę")
+        }
         deferred.await()
     }
 
@@ -189,22 +454,29 @@ class GatewayClient(private val ok: OkHttpClient = OkHttpClient()) {
         }
     }
 
-    suspend fun rpc(method: String, params: JSONObject): JSONObject {
-        val socket = ws ?: error("WS niepołączony")
+    /** Await the full JSON-RPC frame so callers that need acceptance can inspect error/result. */
+    private suspend fun rpcFrame(method: String, params: JSONObject): JSONObject {
+        val transport = connections.snapshot()
+        if (transport.socket == null) error("WS niepołączony")
         val id = nextId.getAndIncrement()
         val deferred = CompletableDeferred<JSONObject>()
-        pending[id] = deferred
         val msg = JSONObject().put("jsonrpc", "2.0").put("id", id)
             .put("method", method).put("params", params)
-        if (!socket.send(msg.toString())) error("Nie udało się wysłać ramki")
-        val resp = deferred.await()
+        val resp = awaitRpcResponse(pending, id, deferred) {
+            connections.sendIfCurrent(transport) { socket -> socket.send(msg.toString()) }
+        }
+        return resp
+    }
+
+    suspend fun rpc(method: String, params: JSONObject): JSONObject {
+        val resp = rpcFrame(method, params)
         resp.optJSONObject("error")?.let {
             error("RPC $method: ${it.optString("message")} (${it.optString("code")})")
         }
         return resp.optJSONObject("result") ?: JSONObject()
     }
 
-    suspend fun listProfiles(): List<BotInfo> {
+    open suspend fun listProfiles(): List<BotInfo> {
         val res = rpc("profiles.list", JSONObject())
         val arr = res.optJSONArray("profiles") ?: return emptyList()
         return (0 until arr.length()).mapNotNull { i ->
@@ -219,14 +491,21 @@ class GatewayClient(private val ok: OkHttpClient = OkHttpClient()) {
         }.sortedBy { it.name != "default" } // default na górze rostera
     }
 
-    suspend fun createSession(profile: String): String {
+    suspend fun createSession(profile: String): CreatedSession {
         val res = rpc("session.create", JSONObject()
             .put("profile", profile)
             .put("title", "Hermes Bots (Android)")
             .put("source", "android-app"))
-        return res.optString("session_id").ifBlank { res.optString("sid") }.also {
-            require(it.isNotBlank()) { "session.create bez session_id: $res" }
-        }
+        val runtimeSessionId = res.optString("session_id").ifBlank { res.optString("sid") }
+        val info = res.optJSONObject("info")
+        return CreatedSession(
+            handle = sessionHandleForCreate(
+                runtimeSessionId = runtimeSessionId,
+                storedSessionId = res.optString("stored_session_id")
+            ),
+            model = info?.optString("model").orEmpty(),
+            provider = info?.optString("provider").orEmpty()
+        )
     }
 
     /** Lista rozmów danego bota (profilu) do wyboru / wznowienia. */
@@ -250,7 +529,7 @@ class GatewayClient(private val ok: OkHttpClient = OkHttpClient()) {
     }
 
     /** Podsumowanie aktywnosci profilu dla rosteru: liczba rozmów + najnowsza. */
-    suspend fun rosterSummary(profile: String): RosterSummary? =
+    open suspend fun rosterSummary(profile: String): RosterSummary? =
         try {
             val sessions = listSessions(profile)
             if (sessions.isEmpty()) null else {
@@ -270,12 +549,15 @@ class GatewayClient(private val ok: OkHttpClient = OkHttpClient()) {
      * Wznawia istniejącą rozmowę i zwraca (nowe session_id runtime, historia).
      * Historia: pary (odUzytkownika, tekst) — tylko role user/assistant.
      */
-    suspend fun resumeSession(profile: String, sessionId: String): Pair<String, List<Pair<Boolean, String>>> {
+    open suspend fun resumeSession(profile: String, sessionId: String): ResumedSession {
         val res = rpc("session.resume", JSONObject()
             .put("session_id", sessionId)
             .put("profile", profile)
             .put("cols", 80))
-        val sid = res.optString("session_id").ifBlank { res.optString("resumed", sessionId) }
+        val runtimeSessionId = res.optString("session_id").ifBlank { res.optString("sid") }
+        val storedSessionId = res.optString("stored_session_id")
+            .ifBlank { res.optString("session_key") }
+            .ifBlank { res.optString("resumed") }
         val out = ArrayList<Pair<Boolean, String>>()
         val arr = res.optJSONArray("messages")
         if (arr != null) {
@@ -287,74 +569,158 @@ class GatewayClient(private val ok: OkHttpClient = OkHttpClient()) {
                 if (text.isNotBlank()) out.add((role == "user") to text)
             }
         }
-        // model/provider sesji z info (do wyswietlenia i przelaczania w UI)
         val info = res.optJSONObject("info")
-        currentModel.value = info?.optString("model").orEmpty()
-        currentProvider.value = info?.optString("provider").orEmpty()
-        return sid to out
+        return ResumedSession(
+            handle = sessionHandleForResume(
+                requestedStoredSessionId = sessionId,
+                returnedRuntimeSessionId = runtimeSessionId,
+                returnedStoredSessionId = storedSessionId
+            ),
+            messages = out,
+            model = info?.optString("model").orEmpty(),
+            provider = info?.optString("provider").orEmpty(),
+            isRunning = res.optBoolean("running")
+        )
     }
 
-    /** Aktualny model/provider aktywnej sesji (uzupełniane przy resume). */
+    /** Aktualny model/provider aktywnej sesji. */
     val currentModel = kotlinx.coroutines.flow.MutableStateFlow("")
     val currentProvider = kotlinx.coroutines.flow.MutableStateFlow("")
 
+    /** Wyczyść stan przed asynchroniczną zmianą rozmowy, żeby nie pokazać starej sesji. */
+    fun clearCurrentSessionModel() = syncCurrentSessionModel(model = "", provider = "")
+
+    /** Zastosuj stan tylko wtedy, gdy ViewModel potwierdzi, że odpowiedź dotyczy aktywnej sesji. */
+    fun syncCurrentSessionModel(model: String, provider: String) {
+        currentModel.value = model
+        currentProvider.value = provider
+    }
+
     /** Dostępni providerzy i modele dla wskazanej sesji (model.options). */
-    suspend fun modelOptions(sessionId: String? = null): List<Pair<String, List<String>>> {
+    open suspend fun modelOptions(sessionId: String? = null): ModelOptionsPayload {
         val params = JSONObject()
         if (!sessionId.isNullOrBlank()) params.put("session_id", sessionId)
         val res = rpc("model.options", params)
-        val providers = mutableListOf<Pair<String, List<String>>>()
-        val arr = res.optJSONArray("providers") ?: return providers
-        for (i in 0 until arr.length()) {
-            val p = arr.optJSONObject(i) ?: continue
-            val models = mutableListOf<String>()
-            val ma = p.optJSONArray("models")
-            if (ma != null) for (j in 0 until ma.length()) models.add(ma.optString(j))
-            providers.add(p.optString("slug") to models)
+        val providers = mutableListOf<ModelProviderOption>()
+        val arr = res.optJSONArray("providers")
+        if (arr != null) {
+            for (i in 0 until arr.length()) {
+                val entry = arr.optJSONObject(i) ?: continue
+                val slug = entry.optString("slug").trim()
+                if (slug.isBlank()) continue
+                val models = buildList {
+                    entry.optJSONArray("models")?.let { rawModels ->
+                        for (j in 0 until rawModels.length()) {
+                            rawModels.optString(j).trim().takeIf { it.isNotEmpty() }?.let(::add)
+                        }
+                    }
+                }
+                val aliases = buildList {
+                    entry.optJSONArray("aliases")?.let { rawAliases ->
+                        for (j in 0 until rawAliases.length()) {
+                            rawAliases.optString(j).trim().takeIf { it.isNotEmpty() }?.let(::add)
+                        }
+                    }
+                }
+                providers += ModelProviderOption(slug = slug, models = models, aliases = aliases)
+            }
         }
-        return providers
+        return ModelOptionsPayload(
+            providers = providers,
+            model = res.optString("model"),
+            provider = res.optString("provider")
+        )
+    }
+
+    /** The transport only reports the result; ViewModel applies it if this session remains active. */
+    open suspend fun setSessionModel(
+        sessionId: String,
+        provider: String,
+        model: String,
+        confirmExpensiveModel: Boolean = false,
+        timeoutMs: Long = MODEL_SWITCH_TIMEOUT_MS
+    ): ModelSwitchResult {
+        require(timeoutMs > 0) { "Model switch timeout must be positive" }
+        return try {
+            withTimeout(timeoutMs) {
+                val command = buildSessionModelSwitchCommand(provider, model)
+                val params = JSONObject()
+                    .put("session_id", sessionId)
+                    .put("key", "model")
+                    .put("value", command)
+                if (confirmExpensiveModel) params.put("confirm_expensive_model", true)
+                modelSwitchOutcomeFromResponse(rpc("config.set", params))
+            }
+        } catch (_: TimeoutCancellationException) {
+            ModelSwitchResult.TimedOut
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            ModelSwitchResult.Failure(modelSwitchErrorForUi(e))
+        }
     }
 
     /**
-     * Zmienia model wyłącznie w bieżącej sesji. Błędy config.set są wynikiem
-     * dla UI (Toast), a nie nieobsłużonym wyjątkiem coroutine na wątku głównym.
+     * A prompt counts as delivered only after the gateway's matching JSON-RPC success response.
+     * A local WebSocket.send() result merely proves that OkHttp accepted a frame for transport.
      */
-    suspend fun setSessionModel(sessionId: String, provider: String, model: String): String? = try {
-        val command = buildSessionModelSwitchCommand(provider, model)
-        val res = rpc("config.set", JSONObject()
+    internal open suspend fun submitPromptResult(
+        sessionId: String,
+        text: String,
+        queued: Boolean = false,
+        acknowledgementTimeoutMs: Long = PROMPT_ACK_TIMEOUT_MS
+    ): PromptSubmissionResult {
+        require(acknowledgementTimeoutMs > 0) { "Prompt ACK timeout must be positive" }
+        val params = JSONObject()
             .put("session_id", sessionId)
-            .put("key", "model")
-            .put("value", command))
-        currentModel.value = res.optString("value").ifBlank { model.trim() }
-        currentProvider.value = provider.trim()
-        null
-    } catch (e: Exception) {
-        modelSwitchErrorForUi(e)
-    }
-
-    fun submitPrompt(sessionId: String, text: String): Boolean {
-        return rpcAsync("prompt.submit", JSONObject()
-            .put("session_id", sessionId).put("text", text))
-    }
-
-    private fun rpcAsync(method: String, params: JSONObject): Boolean {
-        val socket = ws ?: return false
-        if (_linkState.value != LinkState.UP) return false // martwe gniazdo — nie udawaj wysylki
-        val id = nextId.getAndIncrement()
-        val d = CompletableDeferred<JSONObject>()
-        pending[id] = d
-        val sent = socket.send(JSONObject().put("jsonrpc", "2.0").put("id", id)
-            .put("method", method).put("params", params).toString())
-        if (!sent) {
-            pending.remove(id)
-            _linkState.value = LinkState.DOWN
+            .put("text", text)
+        // Queue mode is only for the outbox drain that may race server-side terminal cleanup.
+        if (queued) params.put("queued", true)
+        return try {
+            val response = withTimeout(acknowledgementTimeoutMs) {
+                rpcFrame("prompt.submit", params)
+            }
+            response.optJSONObject("error")?.let { error ->
+                return PromptSubmissionResult.Rejected(
+                    code = error.takeIf { it.has("code") }?.optInt("code"),
+                    message = error.optString("message").ifBlank {
+                        "Gateway odrzucił wiadomość."
+                    }
+                )
+            }
+            val status = response.optJSONObject("result")?.optString("status").orEmpty()
+            if (status == "queued" || status == "streaming") {
+                PromptSubmissionResult.Accepted(status)
+            } else {
+                PromptSubmissionResult.Rejected(
+                    code = null,
+                    message = "Gateway nie potwierdził przyjęcia wiadomości."
+                )
+            }
+        } catch (_: TimeoutCancellationException) {
+            // The request could have reached the gateway. Do not replay without idempotency support.
+            PromptSubmissionResult.Indeterminate
+        } catch (e: CancellationException) {
+            // Caller cancellation must retain normal coroutine semantics; transport reset is ambiguous.
+            if (!currentCoroutineContext().isActive) throw e
+            PromptSubmissionResult.Indeterminate
+        } catch (e: IllegalStateException) {
+            if (e.message == "WS niepołączony" || e.message == "Nie udało się wysłać ramki") {
+                PromptSubmissionResult.NotSent
+            } else {
+                PromptSubmissionResult.Indeterminate
+            }
+        } catch (_: Exception) {
+            PromptSubmissionResult.Indeterminate
         }
-        return sent
     }
+
+    /** Compatibility API for group turns; callers that own an outbox use submitPromptResult(). */
+    open suspend fun submitPrompt(sessionId: String, text: String, queued: Boolean = false): Boolean =
+        submitPromptResult(sessionId, text, queued) is PromptSubmissionResult.Accepted
 
     fun close() {
-        ws?.close(1000, "bye"); ws = null
-        pending.clear()
+        resetConnection()
     }
 
     /** Routines bota = cron jobs otagowane [bot:<nazwa>] (jak desktop Bot Mode). */
@@ -392,10 +758,14 @@ class GatewayClient(private val ok: OkHttpClient = OkHttpClient()) {
             .put("profile", profile))
     }
 
-    /** Resume + stan tury (dla GroupChatEngine): liczba wiadomosci, ostatni assistant, inflight. */
-    suspend fun resumeSessionState(profile: String, sessionId: String): GroupChatEngine.TurnState {
+    /** Resume + state for GroupChatEngine; each resume may replace both identities. */
+    open suspend fun resumeSessionState(profile: String, sessionId: String): GroupChatEngine.TurnState {
         val res = rpc("session.resume", JSONObject()
             .put("session_id", sessionId).put("profile", profile).put("cols", 80))
+        val runtimeSessionId = res.optString("session_id").ifBlank { res.optString("sid") }
+        val storedSessionId = res.optString("stored_session_id")
+            .ifBlank { res.optString("session_key") }
+            .ifBlank { res.optString("resumed") }
         val msgs = res.optJSONArray("messages")
         var count = res.optInt("message_count", 0)
         var lastAssistant: String? = null
@@ -410,12 +780,21 @@ class GatewayClient(private val ok: OkHttpClient = OkHttpClient()) {
             }
         }
         val inflight = res.optJSONObject("inflight")?.let { it.length() > 0 } ?: false
-        return GroupChatEngine.TurnState(count, lastAssistant, inflight,
-            res.optBoolean("running", false))
+        return GroupChatEngine.TurnState(
+            handle = sessionHandleForResume(
+                requestedStoredSessionId = sessionId,
+                returnedRuntimeSessionId = runtimeSessionId,
+                returnedStoredSessionId = storedSessionId
+            ),
+            messageCount = count,
+            lastAssistantText = lastAssistant,
+            inflight = inflight,
+            running = res.optBoolean("running", false)
+        )
     }
 
     /** Niskopoziomowe RPC dla GroupChatEngine. */
-    suspend fun rpcRaw(method: String, params: JSONObject): JSONObject = rpc(method, params)
+    open suspend fun rpcRaw(method: String, params: JSONObject): JSONObject = rpc(method, params)
 
     // ---- Załączniki ----
 
